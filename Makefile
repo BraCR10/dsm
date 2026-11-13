@@ -19,8 +19,8 @@ NODE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(wildcard tools/dsm_node/*.cp
 CLI_BINARY := $(BUILD_DIR)/dsm_cli
 CLI_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(wildcard tools/dsm_cli/*.cpp))
 
-DEMO_BINARY := $(BUILD_DIR)/demo
-DEMO_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(wildcard apps/demo/*.cpp))
+DEMO_BINARY := $(BUILD_DIR)/demo_v1
+DEMO_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(wildcard apps/demo_v1/*.cpp))
 
 .PHONY: all test clean
 

@@ -12,7 +12,7 @@ constexpr const char* kConfigPath = "config/cluster.json";
 constexpr size_t kMessageSize = 4096;
 
 void printUsage() {
-    std::printf("Usage:\n  demo [--node <id>] write <text>\n  demo [--node <id>] read <address>\n");
+    std::printf("Usage:\n  demo_v1 [--node <id>] write <text>\n  demo_v1 [--node <id>] read <address>\n");
 }
 
 void waitForEnter(const char* prompt) {
