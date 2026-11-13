@@ -15,6 +15,12 @@ machine and asks it for information about the cluster.
 If no node is running, every command prints `No DSM node is running on this machine. Start one with
 dsm_node.` and exits with code 1.
 
+A client can only attach to a node of its own machine, because it uses the node's Unix socket and shared
+memory. If `--node` names a node that is not in the configuration or whose IP belongs to another machine,
+the command prints `The requested node is not in the configuration or does not run on this machine.` and
+exits with code 1. Information about remote nodes is requested through the local node, for example
+`dsm_cli pages 2`.
+
 ## Commands
 
 ### status

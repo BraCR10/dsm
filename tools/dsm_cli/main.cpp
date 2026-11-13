@@ -131,6 +131,11 @@ int main(int argumentCount, char** arguments) {
         std::printf("No DSM node is running on this machine. Start one with dsm_node.\n");
         return 1;
     }
+    if (status == DSM_ERR_INVALID_ARGUMENT) {
+        std::printf("The requested node is not in the configuration or does not run on this machine.\n"
+                    "Applications can only attach to a node of their own machine.\n");
+        return 1;
+    }
     if (status != DSM_OK) {
         std::printf("dsm_init failed with status %d\n", status);
         return 1;

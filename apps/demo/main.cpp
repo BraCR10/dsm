@@ -15,8 +15,9 @@ void printUsage() {
     std::printf("Usage:\n  demo [--node <id>] write <text>\n  demo [--node <id>] read <address>\n");
 }
 
-void waitForEnter() {
-    std::printf("Press Enter to finish\n");
+void waitForEnter(const char* prompt) {
+    std::printf("%s\n", prompt);
+    std::fflush(stdout);
     std::string line;
     std::getline(std::cin, line);
 }
@@ -29,7 +30,8 @@ int writeMessage(const char* text) {
     }
     std::strncpy(message, text, kMessageSize - 1);
     std::printf("Message written at %p\n", static_cast<void*>(message));
-    waitForEnter();
+    waitForEnter("Keep this program running while other nodes read the message.\n"
+                 "Press Enter to free the message with dsm_free and finish.");
     dsm_free(message);
     return 0;
 }
@@ -46,7 +48,7 @@ int readMessage(const char* addressText) {
     MsiState state = MSI_INVALID;
     dsm_get_page_status(const_cast<char*>(message), &state);
     std::printf("Local page state: %s\n", state == MSI_SHARED ? "Shared" : state == MSI_MODIFIED ? "Modified" : "Invalid");
-    waitForEnter();
+    waitForEnter("Press Enter to finish.");
     return 0;
 }
 
@@ -72,6 +74,11 @@ int main(int argumentCount, char** arguments) {
     const int status = dsm_init(kConfigPath, nodeId, 0);
     if (status == DSM_ERR_NODE_UNAVAILABLE) {
         std::printf("No DSM node is running on this machine. Start one with dsm_node.\n");
+        return 1;
+    }
+    if (status == DSM_ERR_INVALID_ARGUMENT) {
+        std::printf("The requested node is not in the configuration or does not run on this machine.\n"
+                    "Applications can only attach to a node of their own machine.\n");
         return 1;
     }
     if (status != DSM_OK) {
