@@ -11,8 +11,12 @@ namespace {
 constexpr const char* kConfigPath = "config/cluster.json";
 constexpr size_t kMessageSize = 4096;
 
+void printUsage() {
+    std::printf("Usage:\n  demo [--node <id>] write <text>\n  demo [--node <id>] read <address>\n");
+}
+
 void waitForEnter() {
-    std::printf("Press Enter to finalize the node\n");
+    std::printf("Press Enter to finish\n");
     std::string line;
     std::getline(std::cin, line);
 }
@@ -20,17 +24,24 @@ void waitForEnter() {
 int writeMessage(const char* text) {
     char* message = static_cast<char*>(dsm_malloc(kMessageSize));
     if (message == nullptr) {
-        std::printf("dsm_malloc failed\n");
+        std::printf("dsm_malloc failed: %s\n", std::strerror(errno));
         return 1;
     }
     std::strncpy(message, text, kMessageSize - 1);
     std::printf("Message written at %p\n", static_cast<void*>(message));
     waitForEnter();
+    dsm_free(message);
     return 0;
 }
 
 int readMessage(const char* addressText) {
-    const char* message = reinterpret_cast<const char*>(std::strtoull(addressText, nullptr, 0));
+    char* end = nullptr;
+    const uintptr_t address = std::strtoull(addressText, &end, 0);
+    if (end == addressText || *end != '\0') {
+        printUsage();
+        return 2;
+    }
+    const char* message = reinterpret_cast<const char*>(address);
     std::printf("Message read from %p: %s\n", static_cast<const void*>(message), message);
     MsiState state = MSI_INVALID;
     dsm_get_page_status(const_cast<char*>(message), &state);
@@ -42,18 +53,33 @@ int readMessage(const char* addressText) {
 }  // namespace
 
 int main(int argumentCount, char** arguments) {
-    if (argumentCount != 4 || (std::strcmp(arguments[2], "write") != 0 && std::strcmp(arguments[2], "read") != 0)) {
-        std::printf("Usage:\n  demo <node> write <text>\n  demo <node> read <address>\n");
+    int nodeId = -1;
+    int first = 1;
+    if (argumentCount >= 3 && std::strcmp(arguments[1], "--node") == 0) {
+        char* end = nullptr;
+        nodeId = static_cast<int>(std::strtol(arguments[2], &end, 10));
+        if (end == arguments[2] || *end != '\0' || nodeId < 0) {
+            printUsage();
+            return 2;
+        }
+        first = 3;
+    }
+    if (argumentCount != first + 2 ||
+        (std::strcmp(arguments[first], "write") != 0 && std::strcmp(arguments[first], "read") != 0)) {
+        printUsage();
         return 2;
     }
-    const int nodeId = std::atoi(arguments[1]);
     const int status = dsm_init(kConfigPath, nodeId, 0);
+    if (status == DSM_ERR_NODE_UNAVAILABLE) {
+        std::printf("No DSM node is running on this machine. Start one with dsm_node.\n");
+        return 1;
+    }
     if (status != DSM_OK) {
         std::printf("dsm_init failed with status %d\n", status);
         return 1;
     }
-    const bool isWriter = std::strcmp(arguments[2], "write") == 0;
-    const int result = isWriter ? writeMessage(arguments[3]) : readMessage(arguments[3]);
+    const bool isWriter = std::strcmp(arguments[first], "write") == 0;
+    const int result = isWriter ? writeMessage(arguments[first + 1]) : readMessage(arguments[first + 1]);
     dsm_finalize();
     return result;
 }

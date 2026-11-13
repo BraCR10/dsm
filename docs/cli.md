@@ -1,65 +1,68 @@
 # dsm_cli
 
-`dsm_cli` queries running DSM nodes through their `main` port. It does not join the cluster; it sends
-`STATS_REQUEST` or `PAGE_TABLE_REQUEST` and prints the answer.
+`dsm_cli` is a client of the DSM API, like any application. It attaches to a node running on the same
+machine and asks it for information about the cluster.
 
 ```sh
-./build/dsm_cli --config <path> [--node <id>] <command>
+./build/dsm_cli [--config <path>] [--node <id>] <command>
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `--config <path>` | Cluster configuration, the same file the nodes use |
-| `--node <id>` | Node to query, required by `stats` and `pages` |
+| `--config <path>` | Cluster configuration, `config/cluster.json` by default |
+| `--node <id>` | Local node to attach to; by default the first node running on this machine |
+
+If no node is running, every command prints `No DSM node is running on this machine. Start one with
+dsm_node.` and exits with code 1.
 
 ## Commands
 
 ### status
 
-Shows every node in the configuration, online or offline.
+Shows the node table of the cluster, as seen by the attached node.
 
 ```sh
-./build/dsm_cli --config config/cluster.json status
+./build/dsm_cli status
 ```
 
 ```
-Node 0  online  used 4096 bytes  free 1044480 bytes  faults 0
-Node 1  online  used 0 bytes  free 4194304 bytes  faults 1
-Node 2  offline
+NODE   IP               MAIN   HEARTBEAT  STATE    MEMORY       FREE
+0      127.0.0.1        8080   8280       online   1048576      1044480
+1      127.0.0.1        8081   8281       online   4194304      4194304
+2      127.0.0.1        8082   8282       offline  2097152      2097152
 ```
 
 ### stats
 
-Shows the statistics of one node.
+Shows the statistics of the attached node.
 
 ```sh
-./build/dsm_cli --config config/cluster.json --node 1 stats
+./build/dsm_cli --node 1 stats
 ```
 
 ```
-Node 1 statistics
-  Page faults        1
-  Pages sent         0
-  Pages received     1
-  Invalidations      0
-  Messages sent      7
-  Messages received  7
-  Used memory        0 bytes
-  Free memory        4194304 bytes
+Page faults        1
+Pages sent         0
+Pages received     1
+Invalidations      0
+Messages sent      8
+Messages received  8
+Used memory        0 bytes
+Free memory        4194304 bytes
 ```
 
 ### pages
 
-Shows the page table of one node: every page it allocated as home or holds as a copy.
+Shows the page table of any node. The attached node asks the other node when needed.
 
 ```sh
-./build/dsm_cli --config config/cluster.json --node 0 pages
+./build/dsm_cli --node 1 pages 0
 ```
 
 ```
 Node 0 page table (1 pages)
-  PAGE       HOME   STORE  HOLDER   STATE  PROCESS  ORDER  COPIES
-  0          0      0      0        S      77878    0      1
+PAGE       HOME   STORE  HOLDER   STATE  PROCESS  ORDER  COPIES
+0          0      0      0        S      91417    0      1
 ```
 
 | Column | Meaning |
@@ -78,5 +81,5 @@ Node 0 page table (1 pages)
 | Code | Meaning |
 | --- | --- |
 | `0` | Query answered |
-| `1` | Invalid configuration, unknown node or node not reachable |
+| `1` | No node running, invalid configuration or query failed |
 | `2` | Invalid arguments |
