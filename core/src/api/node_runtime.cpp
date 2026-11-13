@@ -1,8 +1,19 @@
 #include "api/node_runtime.h"
 
 #include "common/log.h"
+#include "network/unix_socket.h"
 
 namespace dsm::api {
+
+std::optional<uint32_t> detectLocalNodeId(const settings::ClusterConfig& config) {
+    for (const settings::NodeConfig& node : config.nodes) {
+        if (network::isLocalAddress(node.ip) && network::isTcpPortAvailable(node.mainPort) &&
+            network::isTcpPortAvailable(node.heartbeatPort)) {
+            return node.nodeId;
+        }
+    }
+    return std::nullopt;
+}
 
 NodeRuntime::NodeRuntime(settings::ClusterConfig config, uint32_t selfNodeId, uint64_t sharedMemoryBytes)
     : config_(std::move(config)), selfNodeId_(selfNodeId) {
@@ -12,6 +23,8 @@ NodeRuntime::NodeRuntime(settings::ClusterConfig config, uint32_t selfNodeId, ui
     peers_ = std::make_unique<peers::PeersModule>(config_, selfNodeId_, sharedMemoryBytes, *network_,
                                                   [this] { return memory_->freeBytes(); });
     stats_ = std::make_unique<stats::StatsModule>(*network_, *memory_);
+    localService_ = std::make_unique<LocalService>(config_, selfNodeId_, *memory_, *stats_, *peers_);
+    memory_->setAccessController(localService_.get());
 }
 
 NodeRuntime::~NodeRuntime() {
@@ -30,11 +43,12 @@ DsmStatus NodeRuntime::start() {
     }
     const settings::NodeConfig* self = config_.findNode(selfNodeId_);
     status = network_->start(self->mainPort, self->heartbeatPort);
-    if (status != DSM_OK) {
-        memory_->stop();
-        return status;
+    if (status == DSM_OK) {
+        status = peers_->joinCluster();
     }
-    status = peers_->joinCluster();
+    if (status == DSM_OK) {
+        status = localService_->start();
+    }
     if (status != DSM_OK) {
         network_->stop();
         memory_->stop();
@@ -50,10 +64,11 @@ void NodeRuntime::shutdown() {
         return;
     }
     started_ = false;
+    localService_->stop();
     peers_->leaveCluster();
     network_->stop();
     memory_->stop();
-    common::logInfo("api", "node %u finalized", selfNodeId_);
+    common::logInfo("api", "node %u stopped", selfNodeId_);
 }
 
 }  // namespace dsm::api

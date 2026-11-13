@@ -4,13 +4,14 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <thread>
+#include <functional>
 #include <vector>
 
 #include "dsm/dsm.h"
 #include "memory/address_map.h"
 #include "memory/address_registry.h"
-#include "memory/pending_faults.h"
+#include "memory/page_access_controller.h"
+#include "memory/shared_window.h"
 #include "msi/msi_module.h"
 #include "network/network_module.h"
 #include "settings/cluster_config.h"
@@ -24,21 +25,30 @@ struct MemoryCounters {
     std::atomic<uint64_t> invalidations{0};
 };
 
+struct FaultResolution {
+    DsmStatus status = DSM_OK;
+    uint64_t pageId = 0;
+    int protection = 0;
+};
+
+using FaultReply = std::function<void(const FaultResolution&)>;
+
 class MemoryModule {
 public:
     MemoryModule(const settings::ClusterConfig& config, uint32_t selfNodeId, uint64_t sharedMemoryBytes,
                  network::NetworkModule& network, msi::MsiModule& msi);
-    ~MemoryModule();
     MemoryModule(const MemoryModule&) = delete;
     MemoryModule& operator=(const MemoryModule&) = delete;
 
     DsmStatus start();
     void stop();
     void registerHandlers();
+    void setAccessController(PageAccessController* controller) { accessController_ = controller; }
 
-    void* allocate(size_t size, DsmStatus& outStatus);
-    DsmStatus release(void* pointer);
-    DsmStatus pageState(const void* address, MsiState& outState);
+    uintptr_t allocate(size_t size, uint32_t processId, DsmStatus& outStatus);
+    DsmStatus release(uintptr_t address, uint64_t& outPageCount);
+    void resolveApplicationFault(uintptr_t address, bool isWrite, const FaultReply& replyWhilePageIsLocked);
+    DsmStatus pageState(uintptr_t address, MsiState& outState);
     std::vector<PageTableEntry> pageTableView();
 
     uint64_t usedBytes();
@@ -46,12 +56,10 @@ public:
     const MemoryCounters& counters() const { return counters_; }
 
 private:
-    void resolverLoop();
-    void resolveFault(const FaultRequest& fault);
-    void fetchSharedCopy(msi::PageTable::Operation& operation, uint64_t pageId);
+    DsmStatus fetchSharedCopy(msi::PageTable::Operation& operation, uint64_t pageId);
     void invalidateCopies(msi::PageTable::Operation& operation, uint64_t pageId);
-    void protectPage(uint64_t pageId, int protection);
-    void* pagePointer(uint64_t pageId) const;
+    void restrictApplications(uint64_t pageId, int protection);
+    uint8_t* pageData(uint64_t pageId) const;
     uint64_t localPageIndex(uint64_t pageId) const;
 
     void handlePageRequest(const network::IncomingMessage& incoming);
@@ -64,11 +72,9 @@ private:
     network::NetworkModule& network_;
     msi::MsiModule& msi_;
     AddressRegistry registry_;
-    PendingFaults pendingFaults_;
     MemoryCounters counters_;
-    void* window_ = nullptr;
-    std::atomic<bool> running_{false};
-    std::thread resolverThread_;
+    SharedWindow window_;
+    PageAccessController* accessController_ = nullptr;
 };
 
 }  // namespace dsm::memory

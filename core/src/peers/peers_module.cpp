@@ -167,6 +167,7 @@ void PeersModule::heartbeatLoop() {
     const auto timeout = std::chrono::seconds(config_.heartbeatTimeoutSec);
     while (heartbeatRunning_.load()) {
         const HeartbeatPayload payload{selfNodeId_, freeMemoryProvider_()};
+        nodeTable_.markActive(selfNodeId_, payload.freeMemoryBytes, Clock::now());
         for (uint32_t activeNodeId : nodeTable_.activeNodeIds()) {
             if (activeNodeId != selfNodeId_) {
                 network_.send(activeNodeId, Channel::Heartbeat,

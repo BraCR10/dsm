@@ -1,12 +1,10 @@
 #include "memory/memory_module.h"
 
 #include <sys/mman.h>
-#include <unistd.h>
 
 #include <cstring>
 
 #include "common/log.h"
-#include "memory/fault_handler.h"
 #include "msi/page_messages.h"
 
 namespace dsm::memory {
@@ -49,44 +47,19 @@ MemoryModule::MemoryModule(const settings::ClusterConfig& config, uint32_t selfN
       msi_(msi),
       registry_(sharedMemoryBytes / config.pageSize) {}
 
-MemoryModule::~MemoryModule() {
-    stop();
-}
-
 DsmStatus MemoryModule::start() {
-    void* requestedStart = reinterpret_cast<void*>(addressMap_.windowStart());
-    window_ = mmap(requestedStart, addressMap_.windowSize(), PROT_NONE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-    if (window_ == MAP_FAILED || window_ != requestedStart) {
-        common::logError(kModule, "cannot reserve the common window at %p: %s", requestedStart, std::strerror(errno));
-        if (window_ != MAP_FAILED) {
-            munmap(window_, addressMap_.windowSize());
-        }
-        window_ = nullptr;
-        return DSM_ERR_NO_MEMORY;
+    const DsmStatus status = window_.createForNode(nodeSharedMemoryName(selfNodeId_), addressMap_.windowSize());
+    if (status == DSM_OK) {
+        common::logInfo(kModule, "shared window %s ready, local region at 0x%llx with %llu pages",
+                        nodeSharedMemoryName(selfNodeId_).c_str(),
+                        static_cast<unsigned long long>(addressMap_.regionStart(selfNodeId_)),
+                        static_cast<unsigned long long>(registry_.totalPageCount()));
     }
-    if (!installFaultHandler(addressMap_.windowStart(), addressMap_.windowSize(), pendingFaults_)) {
-        munmap(window_, addressMap_.windowSize());
-        window_ = nullptr;
-        return DSM_ERR_INTERNAL;
-    }
-    running_.store(true);
-    resolverThread_ = std::thread(&MemoryModule::resolverLoop, this);
-    common::logInfo(kModule, "window reserved at %p, local region at 0x%llx with %llu pages", window_,
-                    static_cast<unsigned long long>(addressMap_.regionStart(selfNodeId_)),
-                    static_cast<unsigned long long>(registry_.totalPageCount()));
-    return DSM_OK;
+    return status;
 }
 
 void MemoryModule::stop() {
-    if (!running_.exchange(false)) {
-        return;
-    }
-    pendingFaults_.shutdown();
-    resolverThread_.join();
-    uninstallFaultHandler();
-    munmap(window_, addressMap_.windowSize());
-    window_ = nullptr;
+    window_.close();
 }
 
 void MemoryModule::registerHandlers() {
@@ -98,31 +71,30 @@ void MemoryModule::registerHandlers() {
     });
 }
 
-void* MemoryModule::pagePointer(uint64_t pageId) const {
-    return reinterpret_cast<void*>(addressMap_.pageAddress(pageId));
+uint8_t* MemoryModule::pageData(uint64_t pageId) const {
+    return window_.data() + pageId * config_.pageSize;
 }
 
 uint64_t MemoryModule::localPageIndex(uint64_t pageId) const {
     return pageId - firstLocalPageId_;
 }
 
-void MemoryModule::protectPage(uint64_t pageId, int protection) {
-    if (mprotect(pagePointer(pageId), config_.pageSize, protection) != 0) {
-        common::logFatal(kModule, "mprotect failed for page %llu: %s", static_cast<unsigned long long>(pageId),
-                         std::strerror(errno));
+void MemoryModule::restrictApplications(uint64_t pageId, int protection) {
+    if (accessController_ != nullptr) {
+        accessController_->restrictApplicationAccess(pageId, protection);
     }
 }
 
-void* MemoryModule::allocate(size_t size, DsmStatus& outStatus) {
+uintptr_t MemoryModule::allocate(size_t size, uint32_t processId, DsmStatus& outStatus) {
     if (size == 0) {
         outStatus = DSM_ERR_INVALID_ARGUMENT;
-        return nullptr;
+        return 0;
     }
     const uint64_t pageCount = (size + config_.pageSize - 1) / config_.pageSize;
-    const auto allocation = registry_.allocate(pageCount, static_cast<uint32_t>(getpid()));
+    const auto allocation = registry_.allocate(pageCount, processId);
     if (!allocation) {
         outStatus = DSM_ERR_NO_MEMORY;
-        return nullptr;
+        return 0;
     }
     const uint64_t firstPageId = firstLocalPageId_ + allocation->firstPageIndex;
     for (uint64_t pageId = firstPageId; pageId < firstPageId + pageCount; ++pageId) {
@@ -133,14 +105,12 @@ void* MemoryModule::allocate(size_t size, DsmStatus& outStatus) {
             entry.currentHolder = selfNodeId_;
             entry.copies.clear();
         });
-        protectPage(pageId, PROT_READ | PROT_WRITE);
     }
     outStatus = DSM_OK;
-    return pagePointer(firstPageId);
+    return addressMap_.pageAddress(firstPageId);
 }
 
-DsmStatus MemoryModule::release(void* pointer) {
-    const auto address = reinterpret_cast<uintptr_t>(pointer);
+DsmStatus MemoryModule::release(uintptr_t address, uint64_t& outPageCount) {
     const auto homeNode = addressMap_.homeNodeOf(address);
     if (!homeNode || *homeNode != selfNodeId_ || address % config_.pageSize != 0) {
         return DSM_ERR_INVALID_POINTER;
@@ -153,59 +123,54 @@ DsmStatus MemoryModule::release(void* pointer) {
     for (uint64_t pageId = firstPageId; pageId < firstPageId + allocation->pageCount; ++pageId) {
         PageTable::Operation operation(msi_.pageTable(), pageId, selfNodeId_);
         invalidateCopies(operation, pageId);
+        restrictApplications(pageId, PROT_NONE);
         operation.update([](PageEntry& entry) {
             entry.allocated = false;
             entry.state = MSI_INVALID;
         });
-        protectPage(pageId, PROT_NONE);
-        madvise(pagePointer(pageId), config_.pageSize, MADV_DONTNEED);
+        window_.discardPage(pageId * config_.pageSize, config_.pageSize);
     }
+    outPageCount = allocation->pageCount;
     return DSM_OK;
 }
 
-void MemoryModule::resolverLoop() {
-    FaultRequest fault;
-    size_t slotIndex = 0;
-    while (pendingFaults_.takeNext(fault, slotIndex)) {
-        resolveFault(fault);
-        pendingFaults_.complete(slotIndex);
-    }
-}
-
-void MemoryModule::resolveFault(const FaultRequest& fault) {
+void MemoryModule::resolveApplicationFault(uintptr_t address, bool isWrite, const FaultReply& replyWhilePageIsLocked) {
     counters_.pageFaults.fetch_add(1);
-    const uint32_t homeNode = *addressMap_.homeNodeOf(fault.address);
-    if (config_.findNode(homeNode) == nullptr) {
-        common::logFatal(kModule, "address %p belongs to node %u, which is not in the configuration",
-                         reinterpret_cast<void*>(fault.address), homeNode);
+    const auto homeNode = addressMap_.homeNodeOf(address);
+    if (!homeNode || config_.findNode(*homeNode) == nullptr) {
+        replyWhilePageIsLocked({DSM_ERR_INVALID_POINTER, 0, PROT_NONE});
+        return;
     }
-    const uint64_t pageId = addressMap_.pageIdOf(fault.address);
-    const AccessType access = fault.isWrite ? AccessType::Write : AccessType::Read;
-    PageTable::Operation operation(msi_.pageTable(), pageId, homeNode);
+    const uint64_t pageId = addressMap_.pageIdOf(address);
+    const AccessType access = isWrite ? AccessType::Write : AccessType::Read;
+    PageTable::Operation operation(msi_.pageTable(), pageId, *homeNode);
     const PageEntry entry = operation.read();
 
+    FaultResolution resolution{DSM_OK, pageId, PROT_NONE};
     switch (msi_.onLocalFault(entry, selfNodeId_, access)) {
         case LocalFaultAction::GrantLocally:
-            protectPage(pageId, protectionFor(entry.state));
-            return;
+            resolution.protection = protectionFor(entry.state);
+            break;
         case LocalFaultAction::FetchReadFromHome:
-            fetchSharedCopy(operation, pageId);
-            return;
+            resolution.status = fetchSharedCopy(operation, pageId);
+            resolution.protection = resolution.status == DSM_OK ? PROT_READ : PROT_NONE;
+            break;
         case LocalFaultAction::InvalidateCopiesThenGrantWrite:
             invalidateCopies(operation, pageId);
             operation.update([](PageEntry& updated) { updated.state = MSI_MODIFIED; });
-            protectPage(pageId, PROT_READ | PROT_WRITE);
-            return;
+            resolution.protection = PROT_READ | PROT_WRITE;
+            break;
         case LocalFaultAction::RejectNotAllocated:
-            common::logFatal(kModule, "access to address %p, which is not allocated",
-                             reinterpret_cast<void*>(fault.address));
+            resolution.status = DSM_ERR_INVALID_POINTER;
+            break;
         case LocalFaultAction::RejectRemoteWrite:
-            common::logFatal(kModule, "write to remote address %p: remote writes arrive in Prototype 2",
-                             reinterpret_cast<void*>(fault.address));
+            resolution.status = DSM_ERR_NOT_OWNER;
+            break;
     }
+    replyWhilePageIsLocked(resolution);
 }
 
-void MemoryModule::fetchSharedCopy(PageTable::Operation& operation, uint64_t pageId) {
+DsmStatus MemoryModule::fetchSharedCopy(PageTable::Operation& operation, uint64_t pageId) {
     const uint32_t homeNode = operation.read().homeNode;
     Message response;
     const DsmStatus status = network_.request(
@@ -213,26 +178,24 @@ void MemoryModule::fetchSharedCopy(PageTable::Operation& operation, uint64_t pag
         makeMessage(MessageType::PageRequest, msi::encodePageRequest({pageId, AccessType::Read})),
         kPageRequestTimeoutMs, response);
     if (status != DSM_OK) {
-        common::logFatal(kModule, "page %llu is lost: home node %u is unavailable (status %d)",
-                         static_cast<unsigned long long>(pageId), homeNode, status);
+        common::logError(kModule, "page %llu is unavailable: home node %u did not answer",
+                         static_cast<unsigned long long>(pageId), homeNode);
+        return DSM_ERR_PAGE_LOST;
     }
     if (response.header.status != DSM_OK) {
-        common::logFatal(kModule, "home node %u refused page %llu (status %d)", homeNode,
-                         static_cast<unsigned long long>(pageId), response.header.status);
+        return static_cast<DsmStatus>(response.header.status);
     }
-    const auto pageData = msi::decodePageData(response.payload, config_.pageSize);
-    if (!pageData || pageData->globalPageId != pageId) {
-        common::logFatal(kModule, "home node %u sent an invalid PAGE_DATA for page %llu", homeNode,
-                         static_cast<unsigned long long>(pageId));
+    const auto pageDataPayload = msi::decodePageData(response.payload, config_.pageSize);
+    if (!pageDataPayload || pageDataPayload->globalPageId != pageId) {
+        return DSM_ERR_INVALID_MESSAGE;
     }
-    protectPage(pageId, PROT_READ | PROT_WRITE);
-    std::memcpy(pagePointer(pageId), pageData->content.data(), config_.pageSize);
-    protectPage(pageId, PROT_READ);
+    std::memcpy(pageData(pageId), pageDataPayload->content.data(), config_.pageSize);
     operation.update([homeNode](PageEntry& entry) {
         entry.state = MSI_SHARED;
         entry.currentHolder = homeNode;
     });
     counters_.pagesReceived.fetch_add(1);
+    return DSM_OK;
 }
 
 void MemoryModule::invalidateCopies(PageTable::Operation& operation, uint64_t pageId) {
@@ -277,14 +240,14 @@ void MemoryModule::handlePageRequest(const IncomingMessage& incoming) {
         case RemoteRequestAction::ShareCopy: {
             const uint32_t requester = incoming.message.header.sourceNode;
             if (entry.state == MSI_MODIFIED) {
-                protectPage(request->globalPageId, PROT_READ);
+                restrictApplications(request->globalPageId, PROT_READ);
             }
             operation.update([requester](PageEntry& updated) {
                 updated.state = MSI_SHARED;
                 updated.copies.insert(requester);
             });
-            response.payload = msi::encodePageData(request->globalPageId, pagePointer(request->globalPageId),
-                                                   config_.pageSize);
+            response.payload =
+                msi::encodePageData(request->globalPageId, pageData(request->globalPageId), config_.pageSize);
             counters_.pagesSent.fetch_add(1);
             break;
         }
@@ -302,18 +265,17 @@ void MemoryModule::handleInvalidate(const IncomingMessage& incoming) {
     }
     const uint32_t homeNode = *addressMap_.homeNodeOf(addressMap_.pageAddress(*pageId));
     PageTable::Operation operation(msi_.pageTable(), *pageId, homeNode);
-    protectPage(*pageId, PROT_NONE);
+    restrictApplications(*pageId, PROT_NONE);
     operation.update([](PageEntry& entry) { entry.state = MSI_INVALID; });
     response.payload = msi::encodePageId(*pageId);
     network_.reply(incoming, std::move(response));
 }
 
-DsmStatus MemoryModule::pageState(const void* address, MsiState& outState) {
-    const auto value = reinterpret_cast<uintptr_t>(address);
-    if (!addressMap_.containsAddress(value)) {
+DsmStatus MemoryModule::pageState(uintptr_t address, MsiState& outState) {
+    if (!addressMap_.containsAddress(address)) {
         return DSM_ERR_INVALID_POINTER;
     }
-    const uint64_t pageId = addressMap_.pageIdOf(value);
+    const uint64_t pageId = addressMap_.pageIdOf(address);
     outState = MSI_INVALID;
     for (const PageEntry& entry : msi_.pageTable().snapshot()) {
         if (entry.pageId == pageId) {

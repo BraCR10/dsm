@@ -3,7 +3,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 
+#include "api/local_service.h"
 #include "dsm/dsm.h"
 #include "memory/memory_module.h"
 #include "msi/msi_module.h"
@@ -13,6 +15,8 @@
 #include "stats/stats_module.h"
 
 namespace dsm::api {
+
+std::optional<uint32_t> detectLocalNodeId(const settings::ClusterConfig& config);
 
 class NodeRuntime {
 public:
@@ -24,10 +28,6 @@ public:
     DsmStatus start();
     void shutdown();
 
-    uint32_t selfNodeId() const { return selfNodeId_; }
-    memory::MemoryModule& memory() { return *memory_; }
-    stats::StatsModule& stats() { return *stats_; }
-
 private:
     const settings::ClusterConfig config_;
     const uint32_t selfNodeId_;
@@ -36,6 +36,7 @@ private:
     std::unique_ptr<memory::MemoryModule> memory_;
     std::unique_ptr<peers::PeersModule> peers_;
     std::unique_ptr<stats::StatsModule> stats_;
+    std::unique_ptr<LocalService> localService_;
     bool started_ = false;
 };
 
