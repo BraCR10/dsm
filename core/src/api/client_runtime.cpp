@@ -25,6 +25,7 @@ using network::MessageType;
 const char* faultFailureReason(int status) {
     switch (status) {
         case DSM_ERR_INVALID_POINTER: return "the address is not allocated";
+        case DSM_ERR_NOT_FOUND: return "the address is not allocated on its home node";
         case DSM_ERR_NOT_OWNER: return "remote writes arrive in Prototype 2";
         case DSM_ERR_PAGE_LOST: return "the home node of the page is unavailable";
         case DSM_ERR_NODE_UNAVAILABLE: return "the local node stopped";
@@ -41,6 +42,12 @@ ClientRuntime::~ClientRuntime() {
 }
 
 DsmStatus ClientRuntime::connectToNode(int requestedNodeId) {
+    if (requestedNodeId >= 0) {
+        const settings::NodeConfig* requested = config_.findNode(static_cast<uint32_t>(requestedNodeId));
+        if (requested == nullptr || !network::isLocalAddress(requested->ip)) {
+            return DSM_ERR_INVALID_ARGUMENT;
+        }
+    }
     for (const settings::NodeConfig& node : config_.nodes) {
         const bool requested = requestedNodeId >= 0 && node.nodeId == static_cast<uint32_t>(requestedNodeId);
         const bool automatic = requestedNodeId < 0 && network::isLocalAddress(node.ip);
