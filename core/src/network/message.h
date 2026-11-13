@@ -42,6 +42,20 @@ enum class MessageType : uint16_t {
     StatsData = 61,
     PageTableRequest = 62,
     PageTableData = 63,
+    LocalAttach = 100,
+    LocalAttachAck = 101,
+    LocalMalloc = 102,
+    LocalMallocAck = 103,
+    LocalFree = 104,
+    LocalFreeAck = 105,
+    LocalFault = 106,
+    LocalFaultAck = 107,
+    LocalSetProtection = 108,
+    LocalSetProtectionAck = 109,
+    LocalPageStatus = 110,
+    LocalPageStatusAck = 111,
+    LocalNodeTable = 112,
+    LocalNodeTableAck = 113,
 };
 
 enum class AccessType : uint8_t { Read = 1, Write = 2 };

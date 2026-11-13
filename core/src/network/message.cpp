@@ -51,6 +51,13 @@ bool isResponseType(MessageType type) {
         case MessageType::LockGrant:
         case MessageType::StatsData:
         case MessageType::PageTableData:
+        case MessageType::LocalAttachAck:
+        case MessageType::LocalMallocAck:
+        case MessageType::LocalFreeAck:
+        case MessageType::LocalFaultAck:
+        case MessageType::LocalSetProtectionAck:
+        case MessageType::LocalPageStatusAck:
+        case MessageType::LocalNodeTableAck:
             return true;
         default:
             return false;
@@ -84,6 +91,20 @@ const char* messageTypeName(MessageType type) {
         case MessageType::StatsData: return "STATS_DATA";
         case MessageType::PageTableRequest: return "PAGE_TABLE_REQUEST";
         case MessageType::PageTableData: return "PAGE_TABLE_DATA";
+        case MessageType::LocalAttach: return "LOCAL_ATTACH";
+        case MessageType::LocalAttachAck: return "LOCAL_ATTACH_ACK";
+        case MessageType::LocalMalloc: return "LOCAL_MALLOC";
+        case MessageType::LocalMallocAck: return "LOCAL_MALLOC_ACK";
+        case MessageType::LocalFree: return "LOCAL_FREE";
+        case MessageType::LocalFreeAck: return "LOCAL_FREE_ACK";
+        case MessageType::LocalFault: return "LOCAL_FAULT";
+        case MessageType::LocalFaultAck: return "LOCAL_FAULT_ACK";
+        case MessageType::LocalSetProtection: return "LOCAL_SET_PROTECTION";
+        case MessageType::LocalSetProtectionAck: return "LOCAL_SET_PROTECTION_ACK";
+        case MessageType::LocalPageStatus: return "LOCAL_PAGE_STATUS";
+        case MessageType::LocalPageStatusAck: return "LOCAL_PAGE_STATUS_ACK";
+        case MessageType::LocalNodeTable: return "LOCAL_NODE_TABLE";
+        case MessageType::LocalNodeTableAck: return "LOCAL_NODE_TABLE_ACK";
     }
     return "UNKNOWN";
 }
