@@ -46,8 +46,13 @@ $(BUILD_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+ifeq ($(TEST_SOURCES),)
+test:
+	@echo "No tests found in core/tests"
+else
 test: $(TEST_BINARY)
 	./$(TEST_BINARY)
+endif
 
 clean:
 	rm -rf $(BUILD_DIR)

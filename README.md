@@ -12,7 +12,6 @@ Requires Linux x86_64 (kernel 4.17 or newer), `g++` 8 or newer, `make` and `libs
 
 ```sh
 make
-make test
 ```
 
 Start one node per terminal. Each node takes the first entry of `config/cluster.json` whose IP
