@@ -23,7 +23,8 @@ belongs to the machine and whose ports are free:
 ./build/dsm_node
 ```
 
-Write a message through node 0 and read it through node 1:
+Write a message through node 0 and, from another terminal, read it through node 1 with the address
+printed by the writer. Keep the writer running while reading: pressing Enter frees the message.
 
 ```sh
 ./build/demo --node 0 write "hello from node 0"
