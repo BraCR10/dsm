@@ -190,6 +190,10 @@ bool NetworkModule::completePendingRequest(const Message& message) {
         pending = found->second;
         pendingRequests_.erase(found);
     }
+    if (pending->onResponse) {
+        pending->onResponse(DSM_OK, message);
+        return true;
+    }
     pending->response = message;
     pending->completed.post();
     return true;
@@ -209,6 +213,10 @@ void NetworkModule::failPendingRequestsOn(const Connection* connection) {
         }
     }
     for (const auto& pending : failedRequests) {
+        if (pending->onResponse) {
+            pending->onResponse(DSM_ERR_NODE_UNAVAILABLE, Message{});
+            continue;
+        }
         pending->failed = true;
         pending->completed.post();
     }
@@ -294,6 +302,34 @@ DsmStatus NetworkModule::request(uint32_t nodeId, Channel channel, Message messa
     }
     outResponse = std::move(pending->response);
     return DSM_OK;
+}
+
+void NetworkModule::requestAsync(uint32_t nodeId, Channel channel, Message message, ResponseCallback onResponse) {
+    auto connection = connectionTo(nodeId, channel);
+    if (!connection) {
+        onResponse(DSM_ERR_NODE_UNAVAILABLE, Message{});
+        return;
+    }
+    const uint64_t requestId = nextRequestId_.fetch_add(1);
+    auto pending = std::make_shared<PendingRequest>();
+    pending->connection = connection;
+    pending->onResponse = std::move(onResponse);
+    {
+        sync::LockGuard guard(pendingMutex_);
+        pendingRequests_[requestId] = pending;
+    }
+    message.header.requestId = requestId;
+    message.header.destinationNode = nodeId;
+    if (!sendOn(connection, message)) {
+        bool stillPending = false;
+        {
+            sync::LockGuard guard(pendingMutex_);
+            stillPending = pendingRequests_.erase(requestId) > 0;
+        }
+        if (stillPending) {
+            pending->onResponse(DSM_ERR_NODE_UNAVAILABLE, Message{});
+        }
+    }
 }
 
 void NetworkModule::reply(const IncomingMessage& incoming, Message response) {

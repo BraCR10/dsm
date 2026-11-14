@@ -49,6 +49,11 @@ bool isResponseType(MessageType type) {
         case MessageType::InvalidateAck:
         case MessageType::NameAck:
         case MessageType::LockGrant:
+        case MessageType::LockReleaseAck:
+        case MessageType::LockDestroyAck:
+        case MessageType::SyncReleaseProcessAck:
+        case MessageType::BarrierRelease:
+        case MessageType::BarrierDestroyAck:
         case MessageType::StatsData:
         case MessageType::PageTableData:
         case MessageType::LocalAttachAck:
@@ -58,6 +63,13 @@ bool isResponseType(MessageType type) {
         case MessageType::LocalSetProtectionAck:
         case MessageType::LocalPageStatusAck:
         case MessageType::LocalNodeTableAck:
+        case MessageType::LocalMutexInitAck:
+        case MessageType::LocalMutexLockAck:
+        case MessageType::LocalMutexUnlockAck:
+        case MessageType::LocalMutexDestroyAck:
+        case MessageType::LocalBarrierInitAck:
+        case MessageType::LocalBarrierWaitAck:
+        case MessageType::LocalBarrierDestroyAck:
             return true;
         default:
             return false;
@@ -85,8 +97,15 @@ const char* messageTypeName(MessageType type) {
         case MessageType::LockRequest: return "LOCK_REQUEST";
         case MessageType::LockGrant: return "LOCK_GRANT";
         case MessageType::LockRelease: return "LOCK_RELEASE";
+        case MessageType::LockReleaseAck: return "LOCK_RELEASE_ACK";
+        case MessageType::LockDestroy: return "LOCK_DESTROY";
+        case MessageType::LockDestroyAck: return "LOCK_DESTROY_ACK";
+        case MessageType::SyncReleaseProcess: return "SYNC_RELEASE_PROCESS";
+        case MessageType::SyncReleaseProcessAck: return "SYNC_RELEASE_PROCESS_ACK";
         case MessageType::BarrierArrive: return "BARRIER_ARRIVE";
         case MessageType::BarrierRelease: return "BARRIER_RELEASE";
+        case MessageType::BarrierDestroy: return "BARRIER_DESTROY";
+        case MessageType::BarrierDestroyAck: return "BARRIER_DESTROY_ACK";
         case MessageType::StatsRequest: return "STATS_REQUEST";
         case MessageType::StatsData: return "STATS_DATA";
         case MessageType::PageTableRequest: return "PAGE_TABLE_REQUEST";
@@ -105,6 +124,20 @@ const char* messageTypeName(MessageType type) {
         case MessageType::LocalPageStatusAck: return "LOCAL_PAGE_STATUS_ACK";
         case MessageType::LocalNodeTable: return "LOCAL_NODE_TABLE";
         case MessageType::LocalNodeTableAck: return "LOCAL_NODE_TABLE_ACK";
+        case MessageType::LocalMutexInit: return "LOCAL_MUTEX_INIT";
+        case MessageType::LocalMutexInitAck: return "LOCAL_MUTEX_INIT_ACK";
+        case MessageType::LocalMutexLock: return "LOCAL_MUTEX_LOCK";
+        case MessageType::LocalMutexLockAck: return "LOCAL_MUTEX_LOCK_ACK";
+        case MessageType::LocalMutexUnlock: return "LOCAL_MUTEX_UNLOCK";
+        case MessageType::LocalMutexUnlockAck: return "LOCAL_MUTEX_UNLOCK_ACK";
+        case MessageType::LocalMutexDestroy: return "LOCAL_MUTEX_DESTROY";
+        case MessageType::LocalMutexDestroyAck: return "LOCAL_MUTEX_DESTROY_ACK";
+        case MessageType::LocalBarrierInit: return "LOCAL_BARRIER_INIT";
+        case MessageType::LocalBarrierInitAck: return "LOCAL_BARRIER_INIT_ACK";
+        case MessageType::LocalBarrierWait: return "LOCAL_BARRIER_WAIT";
+        case MessageType::LocalBarrierWaitAck: return "LOCAL_BARRIER_WAIT_ACK";
+        case MessageType::LocalBarrierDestroy: return "LOCAL_BARRIER_DESTROY";
+        case MessageType::LocalBarrierDestroyAck: return "LOCAL_BARRIER_DESTROY_ACK";
     }
     return "UNKNOWN";
 }

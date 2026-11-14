@@ -27,6 +27,7 @@ struct IncomingMessage {
 };
 
 using MessageHandler = std::function<void(const IncomingMessage&)>;
+using ResponseCallback = std::function<void(DsmStatus status, const Message& response)>;
 
 class NetworkModule {
 public:
@@ -43,6 +44,9 @@ public:
 
     bool send(uint32_t nodeId, Channel channel, Message message);
     DsmStatus request(uint32_t nodeId, Channel channel, Message message, uint32_t timeoutMs, Message& outResponse);
+    // Sends a request without waiting. The callback runs on a reader thread when the response
+    // arrives, or with DSM_ERR_NODE_UNAVAILABLE if the connection fails, so it must not block.
+    void requestAsync(uint32_t nodeId, Channel channel, Message message, ResponseCallback onResponse);
     void reply(const IncomingMessage& incoming, Message response);
     void closeConnectionsTo(uint32_t nodeId);
 
@@ -61,6 +65,7 @@ private:
         Message response;
         std::shared_ptr<Connection> connection;
         bool failed = false;
+        ResponseCallback onResponse;
     };
 
     using ConnectionKey = std::pair<uint32_t, Channel>;
