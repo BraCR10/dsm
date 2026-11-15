@@ -30,6 +30,16 @@ printed by the writer. Keep the writer running while reading: pressing Enter fre
 ./build/demo_v1 --node 1 read 0x100000000000
 ```
 
+Distributed mutex and barrier. `counter` runs several threads that increment a shared counter
+under one mutex. `host` creates a mutex and a barrier and prints the guest command, which another
+node runs to wait for the mutex while the host holds it.
+
+```sh
+./build/sync_demo --node 0 counter 4 2000
+./build/sync_demo --node 0 host
+./build/sync_demo --node 1 guest 0x0 0x0
+```
+
 Query the cluster:
 
 ```sh
