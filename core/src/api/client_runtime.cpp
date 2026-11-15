@@ -1,15 +1,18 @@
 #include "api/client_runtime.h"
 
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <cstring>
+#include <limits>
 
 #include "api/local_messages.h"
 #include "common/log.h"
 #include "memory/fault_handler.h"
 #include "network/unix_socket.h"
 #include "stats/stats_messages.h"
+#include "sync/sync_messages.h"
 
 namespace dsm::api {
 
@@ -17,6 +20,7 @@ namespace {
 
 constexpr const char* kModule = "api";
 constexpr uint32_t kLocalRequestTimeoutMs = 15000;
+constexpr uint32_t kWaitUntilAnsweredMs = std::numeric_limits<uint32_t>::max();
 
 using network::makeMessage;
 using network::Message;
@@ -107,8 +111,12 @@ void ClientRuntime::detach() {
 }
 
 DsmStatus ClientRuntime::call(MessageType type, std::vector<uint8_t> payload, Message& outResponse) {
-    const DsmStatus status = channel_->request(makeMessage(type, std::move(payload)), kLocalRequestTimeoutMs,
-                                               outResponse);
+    return callWithTimeout(type, std::move(payload), kLocalRequestTimeoutMs, outResponse);
+}
+
+DsmStatus ClientRuntime::callWithTimeout(MessageType type, std::vector<uint8_t> payload, uint32_t timeoutMs,
+                                         Message& outResponse) {
+    const DsmStatus status = channel_->request(makeMessage(type, std::move(payload)), timeoutMs, outResponse);
     if (status != DSM_OK) {
         return status;
     }
@@ -234,6 +242,56 @@ DsmStatus ClientRuntime::nodeTable(std::vector<NodeInfo>& outNodes) {
     }
     outNodes = *nodes;
     return DSM_OK;
+}
+
+DsmStatus ClientRuntime::createSyncObject(MessageType type, std::vector<uint8_t> payload, int32_t& outObjectId) {
+    Message response;
+    const DsmStatus status = call(type, std::move(payload), response);
+    const auto objectId = decodeValue(response.payload);
+    if (status != DSM_OK) {
+        return status;
+    }
+    if (!objectId) {
+        return DSM_ERR_INVALID_MESSAGE;
+    }
+    outObjectId = static_cast<int32_t>(*objectId);
+    return DSM_OK;
+}
+
+DsmStatus ClientRuntime::callSyncOperation(MessageType type, uint32_t objectId, uint32_t timeoutMs) {
+    const auto threadId = static_cast<uint32_t>(syscall(SYS_gettid));
+    Message response;
+    return callWithTimeout(type, sync::encodeSyncRequest({objectId, static_cast<uint32_t>(getpid()), threadId}),
+                           timeoutMs, response);
+}
+
+DsmStatus ClientRuntime::createMutex(int32_t& outMutexId) {
+    return createSyncObject(MessageType::LocalMutexInit, {}, outMutexId);
+}
+
+DsmStatus ClientRuntime::lockMutex(uint32_t mutexId) {
+    return callSyncOperation(MessageType::LocalMutexLock, mutexId, kWaitUntilAnsweredMs);
+}
+
+DsmStatus ClientRuntime::unlockMutex(uint32_t mutexId) {
+    return callSyncOperation(MessageType::LocalMutexUnlock, mutexId, kLocalRequestTimeoutMs);
+}
+
+DsmStatus ClientRuntime::destroyMutex(uint32_t mutexId) {
+    return callSyncOperation(MessageType::LocalMutexDestroy, mutexId, kLocalRequestTimeoutMs);
+}
+
+DsmStatus ClientRuntime::createBarrier(int32_t participantCount, int32_t& outBarrierId) {
+    return createSyncObject(MessageType::LocalBarrierInit, encodeValue(static_cast<uint64_t>(participantCount)),
+                            outBarrierId);
+}
+
+DsmStatus ClientRuntime::waitBarrier(uint32_t barrierId) {
+    return callSyncOperation(MessageType::LocalBarrierWait, barrierId, kWaitUntilAnsweredMs);
+}
+
+DsmStatus ClientRuntime::destroyBarrier(uint32_t barrierId) {
+    return callSyncOperation(MessageType::LocalBarrierDestroy, barrierId, kLocalRequestTimeoutMs);
 }
 
 }  // namespace dsm::api

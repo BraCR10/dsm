@@ -23,7 +23,8 @@ NodeRuntime::NodeRuntime(settings::ClusterConfig config, uint32_t selfNodeId, ui
     peers_ = std::make_unique<peers::PeersModule>(config_, selfNodeId_, sharedMemoryBytes, *network_,
                                                   [this] { return memory_->freeBytes(); });
     stats_ = std::make_unique<stats::StatsModule>(*network_, *memory_);
-    localService_ = std::make_unique<LocalService>(config_, selfNodeId_, *memory_, *stats_, *peers_);
+    sync_ = std::make_unique<sync::DistributedSyncModule>(selfNodeId_, *network_);
+    localService_ = std::make_unique<LocalService>(config_, selfNodeId_, *memory_, *stats_, *peers_, *sync_);
     memory_->setAccessController(localService_.get());
 }
 
@@ -36,6 +37,7 @@ DsmStatus NodeRuntime::start() {
     peers_->registerHandlers();
     memory_->registerHandlers();
     stats_->registerHandlers();
+    sync_->registerHandlers();
 
     DsmStatus status = memory_->start();
     if (status != DSM_OK) {

@@ -7,6 +7,7 @@
 #include "common/log.h"
 #include "network/unix_socket.h"
 #include "stats/stats_messages.h"
+#include "sync/sync_messages.h"
 
 namespace dsm::api {
 
@@ -19,11 +20,21 @@ using network::makeMessage;
 using network::Message;
 using network::MessageType;
 
+MessageType syncAckTypeFor(MessageType requestType) {
+    switch (requestType) {
+        case MessageType::LocalMutexLock: return MessageType::LocalMutexLockAck;
+        case MessageType::LocalMutexUnlock: return MessageType::LocalMutexUnlockAck;
+        case MessageType::LocalMutexDestroy: return MessageType::LocalMutexDestroyAck;
+        case MessageType::LocalBarrierWait: return MessageType::LocalBarrierWaitAck;
+        default: return MessageType::LocalBarrierDestroyAck;
+    }
+}
+
 }  // namespace
 
 LocalService::LocalService(const settings::ClusterConfig& config, uint32_t selfNodeId, memory::MemoryModule& memory,
-                           stats::StatsModule& stats, peers::PeersModule& peers)
-    : config_(config), selfNodeId_(selfNodeId), memory_(memory), stats_(stats), peers_(peers) {}
+                           stats::StatsModule& stats, peers::PeersModule& peers, sync::DistributedSyncModule& sync)
+    : config_(config), selfNodeId_(selfNodeId), memory_(memory), stats_(stats), peers_(peers), sync_(sync) {}
 
 LocalService::~LocalService() {
     stop();
@@ -68,6 +79,7 @@ void LocalService::acceptLoop() {
         }
         removeClosedClients();
         auto client = std::make_shared<Client>();
+        client->self = client;
         Client* clientPointer = client.get();
         client->channel = std::make_unique<network::LocalChannel>(
             connection, [this, clientPointer](const Message& request) { handleRequest(*clientPointer, request); });
@@ -75,7 +87,14 @@ void LocalService::acceptLoop() {
             sync::LockGuard guard(clientsMutex_);
             clients_.push_back(client);
         }
-        client->channel->start([clientPointer] { clientPointer->closed.store(true); });
+        client->channel->start([this, clientPointer] { onClientClosed(*clientPointer); });
+    }
+}
+
+void LocalService::onClientClosed(Client& client) {
+    client.closed.store(true);
+    if (client.attached.load()) {
+        sync_.releaseProcess(client.processId);
     }
 }
 
@@ -169,6 +188,17 @@ void LocalService::handleRequest(Client& client, const Message& request) {
         case MessageType::PageTableRequest:
             handlePageTable(client, request);
             return;
+        case MessageType::LocalMutexInit:
+        case MessageType::LocalBarrierInit:
+            handleSyncCreate(client, request);
+            return;
+        case MessageType::LocalMutexLock:
+        case MessageType::LocalMutexUnlock:
+        case MessageType::LocalMutexDestroy:
+        case MessageType::LocalBarrierWait:
+        case MessageType::LocalBarrierDestroy:
+            handleSyncOperation(client, request);
+            return;
         default:
             common::logError(kModule, "unexpected %s from process %u", network::messageTypeName(request.type()),
                              client.processId);
@@ -220,6 +250,75 @@ void LocalService::handlePageTable(Client& client, const Message& request) {
         status = stats_.remotePageTable(static_cast<uint32_t>(*requestedNode), entries);
     }
     replyStatus(client, request, MessageType::PageTableData, status, stats::encodePageTable(entries));
+}
+
+void LocalService::handleSyncCreate(Client& client, const Message& request) {
+    int32_t objectId = 0;
+    if (request.type() == MessageType::LocalMutexInit) {
+        const DsmStatus status = sync_.createMutex(objectId);
+        replyStatus(client, request, MessageType::LocalMutexInitAck, status, encodeValue(static_cast<uint32_t>(objectId)));
+        return;
+    }
+    const auto participantCount = decodeValue(request.payload);
+    DsmStatus status = DSM_ERR_INVALID_ARGUMENT;
+    if (!participantCount) {
+        status = DSM_ERR_INVALID_MESSAGE;
+    } else if (*participantCount <= static_cast<uint64_t>(INT32_MAX)) {
+        status = sync_.createBarrier(static_cast<int32_t>(*participantCount), objectId);
+    }
+    replyStatus(client, request, MessageType::LocalBarrierInitAck, status, encodeValue(static_cast<uint32_t>(objectId)));
+}
+
+void LocalService::handleSyncOperation(Client& client, const Message& request) {
+    const auto payload = sync::decodeSyncRequest(request.payload);
+    const MessageType ackType = syncAckTypeFor(request.type());
+    if (!payload) {
+        replyStatus(client, request, ackType, DSM_ERR_INVALID_MESSAGE);
+        return;
+    }
+    const sync::SyncParticipant participant{selfNodeId_, client.processId, payload->threadId};
+    switch (request.type()) {
+        case MessageType::LocalMutexLock:
+            sync_.lockMutex(payload->objectId, participant,
+                            replyOrUnlockWhenGranted(client, request, payload->objectId, participant));
+            return;
+        case MessageType::LocalMutexUnlock:
+            sync_.unlockMutex(payload->objectId, participant, replyWhenDone(client, request, ackType));
+            return;
+        case MessageType::LocalMutexDestroy:
+            sync_.destroyMutex(payload->objectId, replyWhenDone(client, request, ackType));
+            return;
+        case MessageType::LocalBarrierWait:
+            sync_.waitBarrier(payload->objectId, participant, replyWhenDone(client, request, ackType));
+            return;
+        default:
+            sync_.destroyBarrier(payload->objectId, replyWhenDone(client, request, ackType));
+    }
+}
+
+sync::SyncCompletion LocalService::replyWhenDone(Client& client, const Message& request, MessageType type) {
+    return [this, weakClient = client.self, request, type](DsmStatus status) {
+        const auto liveClient = weakClient.lock();
+        if (liveClient && !liveClient->closed.load()) {
+            replyStatus(*liveClient, request, type, status);
+        }
+    };
+}
+
+sync::SyncCompletion LocalService::replyOrUnlockWhenGranted(Client& client, const Message& request, uint32_t mutexId,
+                                                            const sync::SyncParticipant& requester) {
+    return [this, weakClient = client.self, request, mutexId, requester](DsmStatus status) {
+        const auto liveClient = weakClient.lock();
+        if (liveClient && !liveClient->closed.load()) {
+            replyStatus(*liveClient, request, MessageType::LocalMutexLockAck, status);
+            return;
+        }
+        if (status == DSM_OK) {
+            common::logInfo(kModule, "releasing mutex 0x%x granted to closed process %u", mutexId,
+                            requester.processId);
+            sync_.unlockMutex(mutexId, requester, [](DsmStatus) {});
+        }
+    };
 }
 
 }  // namespace dsm::api

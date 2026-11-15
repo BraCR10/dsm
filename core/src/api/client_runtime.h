@@ -34,11 +34,23 @@ public:
     DsmStatus pageTable(uint32_t nodeId, std::vector<PageTableEntry>& outEntries);
     DsmStatus pageStatus(const void* address, MsiState& outState);
     DsmStatus nodeTable(std::vector<NodeInfo>& outNodes);
+
+    DsmStatus createMutex(int32_t& outMutexId);
+    DsmStatus lockMutex(uint32_t mutexId);
+    DsmStatus unlockMutex(uint32_t mutexId);
+    DsmStatus destroyMutex(uint32_t mutexId);
+    DsmStatus createBarrier(int32_t participantCount, int32_t& outBarrierId);
+    DsmStatus waitBarrier(uint32_t barrierId);
+    DsmStatus destroyBarrier(uint32_t barrierId);
     uint32_t nodeId() const { return nodeId_; }
 
 private:
     DsmStatus connectToNode(int requestedNodeId);
     DsmStatus call(network::MessageType type, std::vector<uint8_t> payload, network::Message& outResponse);
+    DsmStatus callWithTimeout(network::MessageType type, std::vector<uint8_t> payload, uint32_t timeoutMs,
+                              network::Message& outResponse);
+    DsmStatus callSyncOperation(network::MessageType type, uint32_t objectId, uint32_t timeoutMs);
+    DsmStatus createSyncObject(network::MessageType type, std::vector<uint8_t> payload, int32_t& outObjectId);
     void handleNodeRequest(const network::Message& request);
     void observeResponse(const network::Message& response);
     void protectPage(uint64_t pageId, int protection);

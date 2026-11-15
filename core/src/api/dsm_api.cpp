@@ -37,6 +37,16 @@ int copyEntries(const std::vector<Entry>& entries, Entry* output, size_t capacit
     return static_cast<int>(entries.size());
 }
 
+using SyncOperation = DsmStatus (dsm::api::ClientRuntime::*)(uint32_t);
+
+int runSyncOperation(int objectId, SyncOperation operation) {
+    if (objectId < 0) {
+        return DSM_ERR_INVALID_ARGUMENT;
+    }
+    dsm::api::ClientRuntime* client = activeRuntime();
+    return client == nullptr ? DSM_ERR_NOT_INITIALIZED : (client->*operation)(static_cast<uint32_t>(objectId));
+}
+
 }  // namespace
 
 extern "C" {
@@ -96,6 +106,49 @@ void dsm_free(void* ptr) {
     if (client == nullptr || client->release(ptr) != DSM_OK) {
         dsm::common::logFatal("api", "dsm_free received an invalid pointer %p", ptr);
     }
+}
+
+int dsm_mutex_init(void) {
+    dsm::api::ClientRuntime* client = activeRuntime();
+    if (client == nullptr) {
+        return DSM_ERR_NOT_INITIALIZED;
+    }
+    int32_t mutexId = 0;
+    const DsmStatus status = client->createMutex(mutexId);
+    return status == DSM_OK ? mutexId : status;
+}
+
+int dsm_mutex_lock(int mutex_id) {
+    return runSyncOperation(mutex_id, &dsm::api::ClientRuntime::lockMutex);
+}
+
+int dsm_mutex_unlock(int mutex_id) {
+    return runSyncOperation(mutex_id, &dsm::api::ClientRuntime::unlockMutex);
+}
+
+int dsm_mutex_destroy(int mutex_id) {
+    return runSyncOperation(mutex_id, &dsm::api::ClientRuntime::destroyMutex);
+}
+
+int dsm_barrier_init(int participant_count) {
+    if (participant_count <= 0) {
+        return DSM_ERR_INVALID_ARGUMENT;
+    }
+    dsm::api::ClientRuntime* client = activeRuntime();
+    if (client == nullptr) {
+        return DSM_ERR_NOT_INITIALIZED;
+    }
+    int32_t barrierId = 0;
+    const DsmStatus status = client->createBarrier(participant_count, barrierId);
+    return status == DSM_OK ? barrierId : status;
+}
+
+int dsm_barrier(int barrier_id) {
+    return runSyncOperation(barrier_id, &dsm::api::ClientRuntime::waitBarrier);
+}
+
+int dsm_barrier_destroy(int barrier_id) {
+    return runSyncOperation(barrier_id, &dsm::api::ClientRuntime::destroyBarrier);
 }
 
 int dsm_get_stats(DsmStats* out_stats) {

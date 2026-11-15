@@ -13,6 +13,7 @@
 #include "peers/peers_module.h"
 #include "settings/cluster_config.h"
 #include "stats/stats_module.h"
+#include "sync/distributed_sync_module.h"
 
 namespace dsm::api {
 
@@ -36,6 +37,7 @@ private:
     std::unique_ptr<memory::MemoryModule> memory_;
     std::unique_ptr<peers::PeersModule> peers_;
     std::unique_ptr<stats::StatsModule> stats_;
+    std::unique_ptr<sync::DistributedSyncModule> sync_;
     std::unique_ptr<LocalService> localService_;
     bool started_ = false;
 };

@@ -77,6 +77,15 @@ int dsm_finalize(void);
 void* dsm_malloc(size_t size);
 void dsm_free(void* ptr);
 
+int dsm_mutex_init(void);
+int dsm_mutex_lock(int mutex_id);
+int dsm_mutex_unlock(int mutex_id);
+int dsm_mutex_destroy(int mutex_id);
+
+int dsm_barrier_init(int participant_count);
+int dsm_barrier(int barrier_id);
+int dsm_barrier_destroy(int barrier_id);
+
 int dsm_get_stats(DsmStats* out_stats);
 int dsm_get_page_table(int node_id, PageTableEntry* out_entries, size_t max_entries);
 int dsm_get_page_status(void* addr, MsiState* out_state);
