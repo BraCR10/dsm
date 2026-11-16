@@ -8,22 +8,26 @@ namespace dsm::msi {
 
 enum class LocalFaultAction {
     GrantLocally,
-    FetchReadFromHome,
+    FetchFromHome,
     InvalidateCopiesThenGrantWrite,
+    RecallFromHolderThenGrant,
     RejectNotAllocated,
-    RejectRemoteWrite,
 };
 
 enum class RemoteRequestAction {
     ShareCopy,
+    RecallThenShare,
+    GrantExclusive,
+    RecallThenGrantExclusive,
     RejectNotAllocated,
-    RejectRemoteWrite,
 };
 
 LocalFaultAction decideLocalFault(bool isHomeNode, bool isAllocated, MsiState localState,
                                   network::AccessType access);
 
-RemoteRequestAction decideRemoteRequest(bool isAllocated, network::AccessType access);
+RemoteRequestAction decideRemoteRequest(bool isAllocated, bool anotherNodeHoldsModified, network::AccessType access);
+
+MsiState stateAfterRecall(network::AccessType requestedAccess);
 
 const char* msiStateName(MsiState state);
 

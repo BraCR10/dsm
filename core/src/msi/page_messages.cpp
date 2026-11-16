@@ -26,9 +26,11 @@ std::optional<PageRequestPayload> decodePageRequest(const std::vector<uint8_t>& 
     return payload;
 }
 
-std::vector<uint8_t> encodePageData(uint64_t globalPageId, const void* content, size_t contentSize) {
+std::vector<uint8_t> encodePageData(const PageGrant& grant, const void* content, size_t contentSize) {
     ByteWriter writer;
-    writer.writeU64(globalPageId);
+    writer.writeU64(grant.globalPageId);
+    writer.writeU8(static_cast<uint8_t>(grant.grantedState));
+    writer.writeU64(grant.version);
     writer.writeBytes(content, contentSize);
     return writer.take();
 }
@@ -36,9 +38,30 @@ std::vector<uint8_t> encodePageData(uint64_t globalPageId, const void* content, 
 std::optional<PageDataPayload> decodePageData(const std::vector<uint8_t>& bytes, size_t pageSize) {
     ByteReader reader(bytes);
     PageDataPayload payload;
-    payload.globalPageId = reader.readU64();
+    payload.grant.globalPageId = reader.readU64();
+    const uint8_t grantedState = reader.readU8();
+    payload.grant.version = reader.readU64();
     payload.content.resize(pageSize);
     reader.readBytes(payload.content.data(), pageSize);
+    if (!reader.ok() || !reader.atEnd() || grantedState > MSI_MODIFIED) {
+        return std::nullopt;
+    }
+    payload.grant.grantedState = static_cast<MsiState>(grantedState);
+    return payload;
+}
+
+std::vector<uint8_t> encodePageVersion(const PageVersionPayload& payload) {
+    ByteWriter writer;
+    writer.writeU64(payload.globalPageId);
+    writer.writeU64(payload.version);
+    return writer.take();
+}
+
+std::optional<PageVersionPayload> decodePageVersion(const std::vector<uint8_t>& bytes) {
+    ByteReader reader(bytes);
+    PageVersionPayload payload;
+    payload.globalPageId = reader.readU64();
+    payload.version = reader.readU64();
     if (!reader.ok() || !reader.atEnd()) {
         return std::nullopt;
     }

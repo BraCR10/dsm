@@ -30,7 +30,6 @@ const char* faultFailureReason(int status) {
     switch (status) {
         case DSM_ERR_INVALID_POINTER: return "the address is not allocated";
         case DSM_ERR_NOT_FOUND: return "the address is not allocated on its home node";
-        case DSM_ERR_NOT_OWNER: return "remote writes arrive in Prototype 2";
         case DSM_ERR_PAGE_LOST: return "the home node of the page is unavailable";
         case DSM_ERR_NODE_UNAVAILABLE: return "the local node stopped";
         default: return "the node could not resolve the fault";

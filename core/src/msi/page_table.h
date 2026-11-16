@@ -21,6 +21,7 @@ struct PageEntry {
     uint32_t currentHolder = 0;
     std::set<uint32_t> copies;
     bool allocated = false;
+    uint64_t version = 0;
 };
 
 class PageTable {

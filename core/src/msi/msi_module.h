@@ -14,8 +14,9 @@ public:
         return decideLocalFault(entry.homeNode == selfNodeId, entry.allocated, entry.state, access);
     }
 
-    RemoteRequestAction onRemoteRequest(const PageEntry& entry, network::AccessType access) const {
-        return decideRemoteRequest(entry.allocated, access);
+    RemoteRequestAction onRemoteRequest(const PageEntry& entry, bool anotherNodeHoldsModified,
+                                        network::AccessType access) const {
+        return decideRemoteRequest(entry.allocated, anotherNodeHoldsModified, access);
     }
 
 private:

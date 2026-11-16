@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <set>
 #include <vector>
 
 #include "dsm/dsm.h"
@@ -13,6 +14,8 @@
 #include "memory/page_access_controller.h"
 #include "memory/shared_window.h"
 #include "msi/msi_module.h"
+#include "msi/page_messages.h"
+#include "network/message_worker.h"
 #include "network/network_module.h"
 #include "settings/cluster_config.h"
 
@@ -56,13 +59,21 @@ public:
     const MemoryCounters& counters() const { return counters_; }
 
 private:
-    DsmStatus fetchSharedCopy(msi::PageTable::Operation& operation, uint64_t pageId);
-    void invalidateCopies(msi::PageTable::Operation& operation, uint64_t pageId);
+    void resolveHomeFault(uint64_t pageId, network::AccessType access, const FaultReply& replyWhilePageIsLocked);
+    void resolveRemoteFault(uint64_t pageId, uint32_t homeNode, network::AccessType access,
+                            const FaultReply& replyWhilePageIsLocked);
+    DsmStatus requestPageFromHome(uint32_t homeNode, uint64_t pageId, network::AccessType access,
+                                  msi::PageDataPayload& outPage);
+    DsmStatus recallFromHolder(msi::PageTable::Operation& operation, uint64_t pageId, network::AccessType access);
+    void invalidateNodes(msi::PageTable::Operation& operation, uint64_t pageId, const std::set<uint32_t>& nodes);
+    uint64_t nextVersion(msi::PageTable::Operation& operation);
+    network::Message pageDataMessage(uint64_t pageId, MsiState grantedState, uint64_t version);
     void restrictApplications(uint64_t pageId, int protection);
     uint8_t* pageData(uint64_t pageId) const;
     uint64_t localPageIndex(uint64_t pageId) const;
 
     void handlePageRequest(const network::IncomingMessage& incoming);
+    void handlePageRecall(const network::IncomingMessage& incoming);
     void handleInvalidate(const network::IncomingMessage& incoming);
 
     const settings::ClusterConfig& config_;
@@ -75,6 +86,7 @@ private:
     MemoryCounters counters_;
     SharedWindow window_;
     PageAccessController* accessController_ = nullptr;
+    network::MessageWorker pageRequestWorker_;
 };
 
 }  // namespace dsm::memory
