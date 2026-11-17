@@ -1,5 +1,6 @@
 #include "peers/node_table.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace dsm::peers {
@@ -51,6 +52,26 @@ std::vector<uint32_t> NodeTable::activeNodeIds() {
         if (record.active) {
             nodeIds.push_back(nodeId);
         }
+    }
+    return nodeIds;
+}
+
+std::vector<uint32_t> NodeTable::nodesWithFreeMemory(uint64_t requiredBytes, uint32_t requesterNodeId) {
+    std::vector<NodeRecord> candidates;
+    {
+        sync::LockGuard guard(mutex_);
+        for (const auto& [nodeId, record] : records_) {
+            if (record.active && nodeId != requesterNodeId && record.freeMemoryBytes >= requiredBytes) {
+                candidates.push_back(record);
+            }
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const NodeRecord& left, const NodeRecord& right) {
+        return left.freeMemoryBytes > right.freeMemoryBytes;
+    });
+    std::vector<uint32_t> nodeIds;
+    for (const NodeRecord& candidate : candidates) {
+        nodeIds.push_back(candidate.nodeId);
     }
     return nodeIds;
 }

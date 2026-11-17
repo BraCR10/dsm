@@ -34,6 +34,7 @@ public:
     bool isActive(uint32_t nodeId);
     bool isRecentlySeen(uint32_t nodeId, std::chrono::milliseconds window, Clock::time_point now);
     std::vector<uint32_t> activeNodeIds();
+    std::vector<uint32_t> nodesWithFreeMemory(uint64_t requiredBytes, uint32_t requesterNodeId);
     std::vector<uint32_t> takeExpired(std::chrono::milliseconds timeout, Clock::time_point now, uint32_t selfNodeId);
     std::vector<NodeRecord> snapshot();
     std::vector<NodeInfo> toNodeInfo();
