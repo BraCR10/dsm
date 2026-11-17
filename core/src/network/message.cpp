@@ -45,6 +45,7 @@ bool isResponseType(MessageType type) {
     switch (type) {
         case MessageType::NodeJoinAck:
         case MessageType::MemoryGrant:
+        case MessageType::MemoryFreeAck:
         case MessageType::PageData:
         case MessageType::InvalidateAck:
         case MessageType::NameAck:
@@ -86,6 +87,8 @@ const char* messageTypeName(MessageType type) {
         case MessageType::HeartbeatProbe: return "HEARTBEAT_PROBE";
         case MessageType::MemoryRequest: return "MEMORY_REQUEST";
         case MessageType::MemoryGrant: return "MEMORY_GRANT";
+        case MessageType::MemoryFree: return "MEMORY_FREE";
+        case MessageType::MemoryFreeAck: return "MEMORY_FREE_ACK";
         case MessageType::PageRequest: return "PAGE_REQUEST";
         case MessageType::PageData: return "PAGE_DATA";
         case MessageType::PageRecall: return "PAGE_RECALL";

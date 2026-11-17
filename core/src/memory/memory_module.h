@@ -35,6 +35,7 @@ struct FaultResolution {
 };
 
 using FaultReply = std::function<void(const FaultResolution&)>;
+using RemoteMemoryCandidates = std::function<std::vector<uint32_t>(uint64_t requiredBytes)>;
 
 class MemoryModule {
 public:
@@ -47,6 +48,7 @@ public:
     void stop();
     void registerHandlers();
     void setAccessController(PageAccessController* controller) { accessController_ = controller; }
+    void setRemoteMemoryCandidates(RemoteMemoryCandidates candidates) { remoteMemoryCandidates_ = std::move(candidates); }
 
     uintptr_t allocate(size_t size, uint32_t processId, DsmStatus& outStatus);
     DsmStatus release(uintptr_t address, uint64_t& outPageCount);
@@ -59,6 +61,10 @@ public:
     const MemoryCounters& counters() const { return counters_; }
 
 private:
+    uintptr_t allocateLocally(uint64_t pageCount, uint32_t processId, DsmStatus& outStatus);
+    uintptr_t allocateOnAnotherNode(uint64_t pageCount, uint32_t processId, DsmStatus& outStatus);
+    DsmStatus releaseLocally(uintptr_t address, uint64_t& outPageCount);
+    DsmStatus releaseOnHome(uint32_t homeNode, uintptr_t address, uint64_t& outPageCount);
     void resolveHomeFault(uint64_t pageId, network::AccessType access, const FaultReply& replyWhilePageIsLocked);
     void resolveRemoteFault(uint64_t pageId, uint32_t homeNode, network::AccessType access,
                             const FaultReply& replyWhilePageIsLocked);
@@ -72,7 +78,10 @@ private:
     uint8_t* pageData(uint64_t pageId) const;
     uint64_t localPageIndex(uint64_t pageId) const;
 
+    void handleWaitingRequest(const network::IncomingMessage& incoming);
     void handlePageRequest(const network::IncomingMessage& incoming);
+    void handleMemoryRequest(const network::IncomingMessage& incoming);
+    void handleMemoryFree(const network::IncomingMessage& incoming);
     void handlePageRecall(const network::IncomingMessage& incoming);
     void handleInvalidate(const network::IncomingMessage& incoming);
 
@@ -86,7 +95,8 @@ private:
     MemoryCounters counters_;
     SharedWindow window_;
     PageAccessController* accessController_ = nullptr;
-    network::MessageWorker pageRequestWorker_;
+    RemoteMemoryCandidates remoteMemoryCandidates_;
+    network::MessageWorker waitingRequestWorker_;
 };
 
 }  // namespace dsm::memory

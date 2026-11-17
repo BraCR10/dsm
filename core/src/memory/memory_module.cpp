@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "common/log.h"
+#include "memory/memory_messages.h"
 #include "msi/page_messages.h"
 
 namespace dsm::memory {
@@ -19,6 +20,7 @@ constexpr uint32_t kRecallTimeoutMs = 2000;
 constexpr int kRecallAttempts = 200;
 constexpr useconds_t kRecallRetryDelayMicroseconds = 5000;
 constexpr int kFetchAttempts = 8;
+constexpr uint32_t kMemoryRequestTimeoutMs = 5000;
 
 using msi::LocalFaultAction;
 using msi::PageEntry;
@@ -51,7 +53,7 @@ MemoryModule::MemoryModule(const settings::ClusterConfig& config, uint32_t selfN
       network_(network),
       msi_(msi),
       registry_(sharedMemoryBytes / config.pageSize),
-      pageRequestWorker_([this](const IncomingMessage& incoming) { handlePageRequest(incoming); }) {}
+      waitingRequestWorker_([this](const IncomingMessage& incoming) { handleWaitingRequest(incoming); }) {}
 
 DsmStatus MemoryModule::start() {
     const DsmStatus status = window_.createForNode(nodeSharedMemoryName(selfNodeId_), addressMap_.windowSize());
@@ -60,19 +62,25 @@ DsmStatus MemoryModule::start() {
                         nodeSharedMemoryName(selfNodeId_).c_str(),
                         static_cast<unsigned long long>(addressMap_.regionStart(selfNodeId_)),
                         static_cast<unsigned long long>(registry_.totalPageCount()));
-        pageRequestWorker_.start();
+        waitingRequestWorker_.start();
     }
     return status;
 }
 
 void MemoryModule::stop() {
-    pageRequestWorker_.stop();
+    waitingRequestWorker_.stop();
     window_.close();
 }
 
 void MemoryModule::registerHandlers() {
     network_.registerHandler(MessageType::PageRequest, [this](const IncomingMessage& incoming) {
-        pageRequestWorker_.post(incoming);
+        waitingRequestWorker_.post(incoming);
+    });
+    network_.registerHandler(MessageType::MemoryFree, [this](const IncomingMessage& incoming) {
+        waitingRequestWorker_.post(incoming);
+    });
+    network_.registerHandler(MessageType::MemoryRequest, [this](const IncomingMessage& incoming) {
+        handleMemoryRequest(incoming);
     });
     network_.registerHandler(MessageType::PageRecall, [this](const IncomingMessage& incoming) {
         handlePageRecall(incoming);
@@ -102,6 +110,14 @@ uintptr_t MemoryModule::allocate(size_t size, uint32_t processId, DsmStatus& out
         return 0;
     }
     const uint64_t pageCount = (size + config_.pageSize - 1) / config_.pageSize;
+    const uintptr_t address = allocateLocally(pageCount, processId, outStatus);
+    if (outStatus != DSM_ERR_NO_MEMORY) {
+        return address;
+    }
+    return allocateOnAnotherNode(pageCount, processId, outStatus);
+}
+
+uintptr_t MemoryModule::allocateLocally(uint64_t pageCount, uint32_t processId, DsmStatus& outStatus) {
     const auto allocation = registry_.allocate(pageCount, processId);
     if (!allocation) {
         outStatus = DSM_ERR_NO_MEMORY;
@@ -121,11 +137,56 @@ uintptr_t MemoryModule::allocate(size_t size, uint32_t processId, DsmStatus& out
     return addressMap_.pageAddress(firstPageId);
 }
 
+uintptr_t MemoryModule::allocateOnAnotherNode(uint64_t pageCount, uint32_t processId, DsmStatus& outStatus) {
+    outStatus = DSM_ERR_NO_MEMORY;
+    if (!remoteMemoryCandidates_) {
+        return 0;
+    }
+    for (uint32_t candidate : remoteMemoryCandidates_(pageCount * config_.pageSize)) {
+        Message response;
+        const DsmStatus status = network_.request(
+            candidate, Channel::Main,
+            makeMessage(MessageType::MemoryRequest, encodeMemoryRequest({pageCount, processId})),
+            kMemoryRequestTimeoutMs, response);
+        const auto address = decodeAddress(response.payload);
+        if (status == DSM_OK && response.header.status == DSM_OK && address) {
+            common::logInfo(kModule, "local memory is full; node %u granted %llu pages at 0x%llx", candidate,
+                            static_cast<unsigned long long>(pageCount), static_cast<unsigned long long>(*address));
+            outStatus = DSM_OK;
+            return static_cast<uintptr_t>(*address);
+        }
+    }
+    common::logError(kModule, "no node has %llu free pages", static_cast<unsigned long long>(pageCount));
+    return 0;
+}
+
 DsmStatus MemoryModule::release(uintptr_t address, uint64_t& outPageCount) {
     const auto homeNode = addressMap_.homeNodeOf(address);
-    if (!homeNode || *homeNode != selfNodeId_ || address % config_.pageSize != 0) {
+    if (!homeNode || config_.findNode(*homeNode) == nullptr || address % config_.pageSize != 0) {
         return DSM_ERR_INVALID_POINTER;
     }
+    if (*homeNode != selfNodeId_) {
+        return releaseOnHome(*homeNode, address, outPageCount);
+    }
+    return releaseLocally(address, outPageCount);
+}
+
+DsmStatus MemoryModule::releaseOnHome(uint32_t homeNode, uintptr_t address, uint64_t& outPageCount) {
+    Message response;
+    const DsmStatus status =
+        network_.request(homeNode, Channel::Main, makeMessage(MessageType::MemoryFree, encodeAddress(address)),
+                         kMemoryRequestTimeoutMs, response);
+    if (status != DSM_OK) {
+        return DSM_ERR_NODE_UNAVAILABLE;
+    }
+    const auto pageCount = decodeAddress(response.payload);
+    if (response.header.status == DSM_OK && pageCount) {
+        outPageCount = *pageCount;
+    }
+    return static_cast<DsmStatus>(response.header.status);
+}
+
+DsmStatus MemoryModule::releaseLocally(uintptr_t address, uint64_t& outPageCount) {
     const uint64_t firstPageId = addressMap_.pageIdOf(address);
     const auto allocation = registry_.release(localPageIndex(firstPageId));
     if (!allocation) {
@@ -340,6 +401,50 @@ Message MemoryModule::pageDataMessage(uint64_t pageId, MsiState grantedState, ui
     counters_.pagesSent.fetch_add(1);
     return makeMessage(MessageType::PageData,
                        msi::encodePageData({pageId, grantedState, version}, pageData(pageId), config_.pageSize));
+}
+
+void MemoryModule::handleWaitingRequest(const IncomingMessage& incoming) {
+    if (incoming.message.type() == MessageType::MemoryFree) {
+        handleMemoryFree(incoming);
+        return;
+    }
+    handlePageRequest(incoming);
+}
+
+void MemoryModule::handleMemoryRequest(const IncomingMessage& incoming) {
+    Message response = makeMessage(MessageType::MemoryGrant);
+    const auto request = decodeMemoryRequest(incoming.message.payload);
+    if (!request || request->pageCount == 0) {
+        response.header.status = DSM_ERR_INVALID_MESSAGE;
+        network_.reply(incoming, std::move(response));
+        return;
+    }
+    DsmStatus status = DSM_OK;
+    const uintptr_t address = allocateLocally(request->pageCount, request->processId, status);
+    response.header.status = status;
+    if (status == DSM_OK) {
+        common::logInfo(kModule, "granted %llu pages at 0x%llx to process %u of node %u",
+                        static_cast<unsigned long long>(request->pageCount), static_cast<unsigned long long>(address),
+                        request->processId, incoming.message.header.sourceNode);
+        response.payload = encodeAddress(address);
+    }
+    network_.reply(incoming, std::move(response));
+}
+
+void MemoryModule::handleMemoryFree(const IncomingMessage& incoming) {
+    Message response = makeMessage(MessageType::MemoryFreeAck);
+    const auto address = decodeAddress(incoming.message.payload);
+    uint64_t pageCount = 0;
+    const auto homeNode = address ? addressMap_.homeNodeOf(*address) : std::nullopt;
+    if (!address || !homeNode || *homeNode != selfNodeId_) {
+        response.header.status = DSM_ERR_INVALID_POINTER;
+    } else {
+        response.header.status = releaseLocally(*address, pageCount);
+    }
+    if (response.header.status == DSM_OK) {
+        response.payload = encodeAddress(pageCount);
+    }
+    network_.reply(incoming, std::move(response));
 }
 
 void MemoryModule::handlePageRequest(const IncomingMessage& incoming) {

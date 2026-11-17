@@ -25,6 +25,8 @@ enum class MessageType : uint16_t {
     HeartbeatProbe = 6,
     MemoryRequest = 10,
     MemoryGrant = 11,
+    MemoryFree = 12,
+    MemoryFreeAck = 13,
     PageRequest = 20,
     PageData = 21,
     PageRecall = 22,
