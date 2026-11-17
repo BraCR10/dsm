@@ -31,6 +31,7 @@ public:
     void* allocate(size_t size, DsmStatus& outStatus);
     DsmStatus release(void* pointer);
     DsmStatus stats(DsmStats& outStats);
+    DsmStatus nodeStats(uint32_t nodeId, DsmStats& outStats);
     DsmStatus pageTable(uint32_t nodeId, std::vector<PageTableEntry>& outEntries);
     DsmStatus pageStatus(const void* address, MsiState& outState);
     DsmStatus nodeTable(std::vector<NodeInfo>& outNodes);
@@ -50,6 +51,7 @@ private:
     DsmStatus callWithTimeout(network::MessageType type, std::vector<uint8_t> payload, uint32_t timeoutMs,
                               network::Message& outResponse);
     DsmStatus callSyncOperation(network::MessageType type, uint32_t objectId, uint32_t timeoutMs);
+    DsmStatus requestStats(std::vector<uint8_t> payload, DsmStats& outStats);
     DsmStatus createSyncObject(network::MessageType type, std::vector<uint8_t> payload, int32_t& outObjectId);
     void handleNodeRequest(const network::Message& request);
     void observeResponse(const network::Message& response);

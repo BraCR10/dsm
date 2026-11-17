@@ -159,6 +159,14 @@ int dsm_get_stats(DsmStats* out_stats) {
     return client == nullptr ? DSM_ERR_NOT_INITIALIZED : client->stats(*out_stats);
 }
 
+int dsm_get_node_stats(int node_id, DsmStats* out_stats) {
+    if (node_id < 0 || out_stats == nullptr) {
+        return DSM_ERR_INVALID_ARGUMENT;
+    }
+    dsm::api::ClientRuntime* client = activeRuntime();
+    return client == nullptr ? DSM_ERR_NOT_INITIALIZED : client->nodeStats(static_cast<uint32_t>(node_id), *out_stats);
+}
+
 int dsm_get_page_table(int node_id, PageTableEntry* out_entries, size_t max_entries) {
     if (node_id < 0 || (out_entries == nullptr && max_entries > 0)) {
         return DSM_ERR_INVALID_ARGUMENT;

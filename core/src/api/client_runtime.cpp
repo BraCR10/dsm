@@ -187,8 +187,16 @@ DsmStatus ClientRuntime::release(void* pointer) {
 }
 
 DsmStatus ClientRuntime::stats(DsmStats& outStats) {
+    return requestStats({}, outStats);
+}
+
+DsmStatus ClientRuntime::nodeStats(uint32_t nodeId, DsmStats& outStats) {
+    return requestStats(encodeValue(nodeId), outStats);
+}
+
+DsmStatus ClientRuntime::requestStats(std::vector<uint8_t> payload, DsmStats& outStats) {
     Message response;
-    const DsmStatus status = call(MessageType::StatsRequest, {}, response);
+    const DsmStatus status = call(MessageType::StatsRequest, std::move(payload), response);
     const auto stats = stats::decodeStats(response.payload);
     if (status != DSM_OK) {
         return status;

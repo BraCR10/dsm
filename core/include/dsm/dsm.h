@@ -87,6 +87,7 @@ int dsm_barrier(int barrier_id);
 int dsm_barrier_destroy(int barrier_id);
 
 int dsm_get_stats(DsmStats* out_stats);
+int dsm_get_node_stats(int node_id, DsmStats* out_stats);
 int dsm_get_page_table(int node_id, PageTableEntry* out_entries, size_t max_entries);
 int dsm_get_page_status(void* addr, MsiState* out_state);
 int dsm_get_node_table(NodeInfo* out_nodes, size_t max_nodes);

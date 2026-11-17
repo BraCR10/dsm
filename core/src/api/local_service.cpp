@@ -183,7 +183,7 @@ void LocalService::handleRequest(Client& client, const Message& request) {
                         encodeNodeTable(peers_.nodeTable().toNodeInfo()));
             return;
         case MessageType::StatsRequest:
-            replyStatus(client, request, MessageType::StatsData, DSM_OK, stats::encodeStats(stats_.localStats()));
+            handleStats(client, request);
             return;
         case MessageType::PageTableRequest:
             handlePageTable(client, request);
@@ -233,6 +233,23 @@ void LocalService::handleFault(Client& client, const Message& request) {
                                                     encodeProtection({resolution.pageId,
                                                                       static_cast<uint32_t>(resolution.protection)}));
                                     });
+}
+
+void LocalService::handleStats(Client& client, const Message& request) {
+    const auto requestedNode = request.payload.empty() ? std::optional<uint64_t>(selfNodeId_)
+                                                       : decodeValue(request.payload);
+    if (!requestedNode) {
+        replyStatus(client, request, MessageType::StatsData, DSM_ERR_INVALID_MESSAGE);
+        return;
+    }
+    DsmStats nodeStats{};
+    DsmStatus status = DSM_OK;
+    if (*requestedNode == selfNodeId_) {
+        nodeStats = stats_.localStats();
+    } else {
+        status = stats_.remoteStats(static_cast<uint32_t>(*requestedNode), nodeStats);
+    }
+    replyStatus(client, request, MessageType::StatsData, status, stats::encodeStats(nodeStats));
 }
 
 void LocalService::handlePageTable(Client& client, const Message& request) {

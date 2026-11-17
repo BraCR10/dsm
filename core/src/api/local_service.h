@@ -47,6 +47,7 @@ private:
     void handleRequest(Client& client, const network::Message& request);
     void handleAttach(Client& client, const network::Message& request);
     void handleFault(Client& client, const network::Message& request);
+    void handleStats(Client& client, const network::Message& request);
     void handlePageTable(Client& client, const network::Message& request);
     void handleSyncCreate(Client& client, const network::Message& request);
     void handleSyncOperation(Client& client, const network::Message& request);
