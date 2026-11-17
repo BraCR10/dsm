@@ -24,9 +24,18 @@ struct CounterWork {
     int iterations = 0;
 };
 
+struct SharedCounter {
+    long long* counter = nullptr;
+    int mutexId = -1;
+    int workBarrierId = -1;
+    int doneBarrierId = -1;
+};
+
 void printUsage() {
     std::printf("Usage:\n"
-                "  sync_demo [--node <id>] counter <threads> <iterations>\n"
+                "  sync_demo [--node <id>] counter <threads> <iterations> [<nodes>]\n"
+                "  sync_demo [--node <id>] join <address> <mutex_id> <work_barrier> <done_barrier> <threads> "
+                "<iterations>\n"
                 "  sync_demo [--node <id>] host\n"
                 "  sync_demo [--node <id>] guest <mutex_id> <barrier_id>\n");
 }
@@ -61,33 +70,57 @@ void* incrementCounter(void* argument) {
     return nullptr;
 }
 
-int runCounter(int threadCount, int iterations) {
-    auto* counter = static_cast<long long*>(dsm_malloc(sizeof(long long)));
-    const int mutexId = dsm_mutex_init();
-    const int barrierId = dsm_barrier_init(threadCount);
-    if (counter == nullptr || !succeeded("dsm_mutex_init", mutexId) || !succeeded("dsm_barrier_init", barrierId)) {
-        return 1;
-    }
-    *counter = 0;
-    std::printf("%d threads add %d each to a shared counter protected by mutex 0x%x\n", threadCount, iterations,
-                mutexId);
-    CounterWork work{counter, mutexId, barrierId, iterations};
+long long runIncrements(const SharedCounter& shared, int threadCount, int iterations) {
+    CounterWork work{shared.counter, shared.mutexId, shared.workBarrierId, iterations};
     std::vector<pthread_t> threads(static_cast<size_t>(threadCount));
-    const Clock::time_point start = Clock::now();
     for (pthread_t& thread : threads) {
         pthread_create(&thread, nullptr, incrementCounter, &work);
     }
     for (pthread_t& thread : threads) {
         pthread_join(thread, nullptr);
     }
-    const long long expected = static_cast<long long>(threadCount) * iterations;
-    const long long result = *counter;
+    return *shared.counter;
+}
+
+int runCounter(int threadCount, int iterations, int nodeCount) {
+    SharedCounter shared;
+    shared.counter = static_cast<long long*>(dsm_malloc(sizeof(long long)));
+    shared.mutexId = dsm_mutex_init();
+    shared.workBarrierId = dsm_barrier_init(threadCount * nodeCount);
+    shared.doneBarrierId = dsm_barrier_init(nodeCount);
+    if (shared.counter == nullptr || !succeeded("dsm_mutex_init", shared.mutexId) ||
+        !succeeded("dsm_barrier_init", shared.workBarrierId) || !succeeded("dsm_barrier_init", shared.doneBarrierId)) {
+        return 1;
+    }
+    *shared.counter = 0;
+    std::printf("%d node(s) with %d threads each add %d to a shared counter at %p protected by mutex 0x%x\n",
+                nodeCount, threadCount, iterations, static_cast<void*>(shared.counter), shared.mutexId);
+    if (nodeCount > 1) {
+        std::printf("Run on each other node: sync_demo join %p 0x%x 0x%x 0x%x %d %d\n",
+                    static_cast<void*>(shared.counter), shared.mutexId, shared.workBarrierId, shared.doneBarrierId,
+                    threadCount, iterations);
+    }
+    std::fflush(stdout);
+    const Clock::time_point start = Clock::now();
+    const long long result = runIncrements(shared, threadCount, iterations);
+    const long long expected = static_cast<long long>(threadCount) * iterations * nodeCount;
     std::printf("Counter %lld, expected %lld, %s (%.2f s)\n", result, expected,
                 result == expected ? "correct" : "WRONG", secondsSince(start));
-    dsm_mutex_destroy(mutexId);
-    dsm_barrier_destroy(barrierId);
-    dsm_free(counter);
+    dsm_barrier(shared.doneBarrierId);
+    dsm_mutex_destroy(shared.mutexId);
+    dsm_barrier_destroy(shared.workBarrierId);
+    dsm_barrier_destroy(shared.doneBarrierId);
+    dsm_free(shared.counter);
     return result == expected ? 0 : 1;
+}
+
+int runJoin(const SharedCounter& shared, int threadCount, int iterations) {
+    std::printf("Joining the shared counter at %p\n", static_cast<void*>(shared.counter));
+    std::fflush(stdout);
+    const long long result = runIncrements(shared, threadCount, iterations);
+    std::printf("Counter seen by this node after every node finished: %lld\n", result);
+    dsm_barrier(shared.doneBarrierId);
+    return 0;
 }
 
 int runHost() {
@@ -140,10 +173,23 @@ int runCommand(int argumentCount, char** arguments, int first) {
     const char* command = arguments[first];
     long firstValue = 0;
     long secondValue = 0;
-    if (std::strcmp(command, "counter") == 0 && argumentCount == first + 3 &&
+    long nodeCount = 1;
+    if (std::strcmp(command, "counter") == 0 && (argumentCount == first + 3 || argumentCount == first + 4) &&
         parseNumber(arguments[first + 1], firstValue) && parseNumber(arguments[first + 2], secondValue) &&
-        firstValue > 0) {
-        return runCounter(static_cast<int>(firstValue), static_cast<int>(secondValue));
+        firstValue > 0 && (argumentCount == first + 3 || (parseNumber(arguments[first + 3], nodeCount) && nodeCount > 0))) {
+        return runCounter(static_cast<int>(firstValue), static_cast<int>(secondValue), static_cast<int>(nodeCount));
+    }
+    if (std::strcmp(command, "join") == 0 && argumentCount == first + 7) {
+        long values[6] = {};
+        for (int index = 0; index < 6; ++index) {
+            if (!parseNumber(arguments[first + 1 + index], values[index])) {
+                printUsage();
+                return 2;
+            }
+        }
+        const SharedCounter shared{reinterpret_cast<long long*>(values[0]), static_cast<int>(values[1]),
+                                   static_cast<int>(values[2]), static_cast<int>(values[3])};
+        return runJoin(shared, static_cast<int>(values[4]), static_cast<int>(values[5]));
     }
     if (std::strcmp(command, "host") == 0 && argumentCount == first + 1) {
         return runHost();

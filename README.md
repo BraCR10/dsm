@@ -31,11 +31,14 @@ printed by the writer. Keep the writer running while reading: pressing Enter fre
 ```
 
 Distributed mutex and barrier. `counter` runs several threads that increment a shared counter
-under one mutex. `host` creates a mutex and a barrier and prints the guest command, which another
-node runs to wait for the mutex while the host holds it.
+under one mutex. With a node count it prints the `join` command that every other node runs, so
+threads of all nodes write the same page. `host` creates a mutex and a barrier and prints the
+guest command, which another node runs to wait for the mutex while the host holds it.
 
 ```sh
 ./build/sync_demo --node 0 counter 4 2000
+./build/sync_demo --node 0 counter 4 500 2
+./build/sync_demo --node 1 join 0x100000000000 0x0 0x0 0x1 4 500
 ./build/sync_demo --node 0 host
 ./build/sync_demo --node 1 guest 0x0 0x0
 ```
