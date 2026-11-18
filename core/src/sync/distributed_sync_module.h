@@ -14,9 +14,6 @@
 
 namespace dsm::sync {
 
-// Distributed mutexes and barriers. Objects created here are managed by this node; operations on
-// objects of other nodes are sent to their manager. Every operation answers through its
-// completion, so no caller thread waits inside the node.
 class DistributedSyncModule {
 public:
     DistributedSyncModule(uint32_t selfNodeId, network::NetworkModule& network);

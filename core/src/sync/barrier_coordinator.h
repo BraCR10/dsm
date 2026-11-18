@@ -11,8 +11,6 @@
 
 namespace dsm::sync {
 
-// State of the distributed barriers managed by this node. A barrier releases every waiter when
-// the last participant arrives and then starts counting again, so it can be reused.
 class BarrierCoordinator {
 public:
     explicit BarrierCoordinator(uint32_t selfNodeId) : selfNodeId_(selfNodeId) {}

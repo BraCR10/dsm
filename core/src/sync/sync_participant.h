@@ -11,7 +11,6 @@ namespace dsm::sync {
 constexpr uint32_t kSyncCounterBits = 16;
 constexpr uint32_t kSyncCounterLimit = 1u << kSyncCounterBits;
 
-// A thread of an application, identified across the cluster by its node, process and thread ids.
 struct SyncParticipant {
     uint32_t nodeId = 0;
     uint32_t processId = 0;
