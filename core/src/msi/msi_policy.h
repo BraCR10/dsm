@@ -19,13 +19,15 @@ enum class RemoteRequestAction {
     RecallThenShare,
     GrantExclusive,
     RecallThenGrantExclusive,
+    RequesterAlreadyHolds,
     RejectNotAllocated,
 };
 
 LocalFaultAction decideLocalFault(bool isHomeNode, bool isAllocated, MsiState localState,
                                   network::AccessType access);
 
-RemoteRequestAction decideRemoteRequest(bool isAllocated, bool anotherNodeHoldsModified, network::AccessType access);
+RemoteRequestAction decideRemoteRequest(bool isAllocated, bool anotherNodeHoldsModified, network::AccessType access,
+                                        bool requesterHoldsModified = false);
 
 MsiState stateAfterRecall(network::AccessType requestedAccess);
 

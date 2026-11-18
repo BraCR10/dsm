@@ -19,7 +19,8 @@ constexpr uint32_t kInvalidateTimeoutMs = 2000;
 constexpr uint32_t kRecallTimeoutMs = 2000;
 constexpr int kRecallAttempts = 200;
 constexpr useconds_t kRecallRetryDelayMicroseconds = 5000;
-constexpr int kFetchAttempts = 8;
+constexpr int kFetchAttempts = 1000;
+constexpr useconds_t kFetchRetryDelayMicroseconds = 1000;
 constexpr uint32_t kMemoryRequestTimeoutMs = 5000;
 
 using msi::LocalFaultAction;
@@ -80,7 +81,7 @@ void MemoryModule::registerHandlers() {
         waitingRequestWorker_.post(incoming);
     });
     network_.registerHandler(MessageType::MemoryRequest, [this](const IncomingMessage& incoming) {
-        handleMemoryRequest(incoming);
+        waitingRequestWorker_.post(incoming);
     });
     network_.registerHandler(MessageType::PageRecall, [this](const IncomingMessage& incoming) {
         handlePageRecall(incoming);
@@ -287,6 +288,10 @@ void MemoryModule::resolveRemoteFault(uint64_t pageId, uint32_t homeNode, Access
         }
         msi::PageDataPayload page;
         const DsmStatus status = requestPageFromHome(homeNode, pageId, access, page);
+        if (status == DSM_ERR_BUSY) {
+            usleep(kFetchRetryDelayMicroseconds);
+            continue;
+        }
         if (status != DSM_OK) {
             replyWhilePageIsLocked({status, pageId, PROT_NONE});
             return;
@@ -309,7 +314,9 @@ void MemoryModule::resolveRemoteFault(uint64_t pageId, uint32_t homeNode, Access
         replyWhilePageIsLocked({DSM_OK, pageId, protectionFor(grantedState)});
         return;
     }
-    replyWhilePageIsLocked({DSM_ERR_PAGE_LOST, pageId, PROT_NONE});
+    common::logError(kModule, "page %llu stayed busy after %d requests", static_cast<unsigned long long>(pageId),
+                     kFetchAttempts);
+    replyWhilePageIsLocked({DSM_ERR_BUSY, pageId, PROT_NONE});
 }
 
 DsmStatus MemoryModule::requestPageFromHome(uint32_t homeNode, uint64_t pageId, AccessType access,
@@ -404,11 +411,16 @@ Message MemoryModule::pageDataMessage(uint64_t pageId, MsiState grantedState, ui
 }
 
 void MemoryModule::handleWaitingRequest(const IncomingMessage& incoming) {
-    if (incoming.message.type() == MessageType::MemoryFree) {
-        handleMemoryFree(incoming);
-        return;
+    switch (incoming.message.type()) {
+        case MessageType::MemoryFree:
+            handleMemoryFree(incoming);
+            return;
+        case MessageType::MemoryRequest:
+            handleMemoryRequest(incoming);
+            return;
+        default:
+            handlePageRequest(incoming);
     }
-    handlePageRequest(incoming);
 }
 
 void MemoryModule::handleMemoryRequest(const IncomingMessage& incoming) {
@@ -465,10 +477,14 @@ void MemoryModule::handlePageRequest(const IncomingMessage& incoming) {
     const uint32_t requester = incoming.message.header.sourceNode;
     PageTable::Operation operation(msi_.pageTable(), pageId, selfNodeId_);
     const PageEntry entry = operation.read();
-    const bool anotherNodeHoldsModified = entry.allocated && entry.currentHolder != selfNodeId_;
-    const auto action = msi_.onRemoteRequest(entry, anotherNodeHoldsModified, request->access);
+    const auto action = msi_.onRemoteRequest(entry, selfNodeId_, requester, request->access);
     if (action == RemoteRequestAction::RejectNotAllocated) {
         response.header.status = DSM_ERR_NOT_FOUND;
+        network_.reply(incoming, std::move(response));
+        return;
+    }
+    if (action == RemoteRequestAction::RequesterAlreadyHolds) {
+        response.header.status = DSM_ERR_BUSY;
         network_.reply(incoming, std::move(response));
         return;
     }

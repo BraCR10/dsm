@@ -28,9 +28,13 @@ LocalFaultAction decideLocalFault(bool isHomeNode, bool isAllocated, MsiState lo
     return LocalFaultAction::GrantLocally;
 }
 
-RemoteRequestAction decideRemoteRequest(bool isAllocated, bool anotherNodeHoldsModified, AccessType access) {
+RemoteRequestAction decideRemoteRequest(bool isAllocated, bool anotherNodeHoldsModified, AccessType access,
+                                        bool requesterHoldsModified) {
     if (!isAllocated) {
         return RemoteRequestAction::RejectNotAllocated;
+    }
+    if (anotherNodeHoldsModified && requesterHoldsModified) {
+        return RemoteRequestAction::RequesterAlreadyHolds;
     }
     if (access == AccessType::Read) {
         return anotherNodeHoldsModified ? RemoteRequestAction::RecallThenShare : RemoteRequestAction::ShareCopy;
