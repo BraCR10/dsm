@@ -10,7 +10,10 @@ Queries the cluster through the DSM node running on this machine.
 | --- | --- |
 | `status` | Every node of the cluster, online or offline |
 | `stats` | Statistics of the local node |
+| `stats <id>` | Statistics of node `<id>` |
+| `stats all` | Statistics of every active node and the totals of the system |
 | `pages <id>` | Page table of node `<id>` |
+| `pages all` | Page tables of every active node |
 
 `--node <id>` picks the local node to use when several run on the same machine.
 
