@@ -31,6 +31,7 @@ const char* faultFailureReason(int status) {
         case DSM_ERR_INVALID_POINTER: return "the address is not allocated";
         case DSM_ERR_NOT_FOUND: return "the address is not allocated on its home node";
         case DSM_ERR_PAGE_LOST: return "the home node of the page is unavailable";
+        case DSM_ERR_BUSY: return "the page stayed busy because other nodes kept requesting it";
         case DSM_ERR_NODE_UNAVAILABLE: return "the local node stopped";
         default: return "the node could not resolve the fault";
     }
@@ -105,8 +106,8 @@ void ClientRuntime::detach() {
     pendingFaults_.shutdown();
     resolverThread_.join();
     memory::uninstallFaultHandler();
-    window_.close();
     channel_->stop();
+    window_.close();
 }
 
 DsmStatus ClientRuntime::call(MessageType type, std::vector<uint8_t> payload, Message& outResponse) {
