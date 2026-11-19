@@ -1,7 +1,7 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -g -Wall -Wextra -Werror -pthread
 CPPFLAGS += -Icore/include -Icore/src -isystem core/third_party -MMD -MP
-LDLIBS += -lcrypto -pthread
+LDLIBS += -pthread
 
 BUILD_DIR := build
 LIBRARY := $(BUILD_DIR)/libdsm.a

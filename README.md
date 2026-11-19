@@ -8,7 +8,7 @@ The architecture, API, message protocol and configuration are described in the
 
 ## Run
 
-Requires Linux x86_64 (kernel 4.17 or newer), `g++` 8 or newer, `make` and `libssl-dev`.
+Requires Linux x86_64 (kernel 4.17 or newer), `g++` 8 or newer and `make`.
 
 ```sh
 make
@@ -51,4 +51,5 @@ Query the cluster:
 
 All CLI commands are described in [docs/cli.md](docs/cli.md).
 
-Third party: [nlohmann/json](https://github.com/nlohmann/json) 3.11.3 (MIT), vendored in `core/third_party`.
+Third party, vendored in `core/third_party`: [nlohmann/json](https://github.com/nlohmann/json) 3.11.3 (MIT) and
+[PicoSHA2](https://github.com/okdshin/PicoSHA2) (MIT) for the SHA-256 configuration hash.

@@ -1,13 +1,12 @@
 #include "settings/cluster_config.h"
 
-#include <openssl/evp.h>
-
 #include <fstream>
 #include <set>
 #include <sstream>
 #include <utility>
 
 #include "nlohmann/json.hpp"
+#include "picosha2/picosha2.h"
 
 namespace dsm::settings {
 
@@ -35,8 +34,7 @@ uint64_t parseAddress(const Json& value) {
 ConfigHash computeConfigHash(const Json& document) {
     const std::string canonicalText = document.dump();
     ConfigHash hash{};
-    unsigned int hashLength = 0;
-    EVP_Digest(canonicalText.data(), canonicalText.size(), hash.data(), &hashLength, EVP_sha256(), nullptr);
+    picosha2::hash256(canonicalText.begin(), canonicalText.end(), hash.begin(), hash.end());
     return hash;
 }
 
