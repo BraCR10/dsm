@@ -9,6 +9,7 @@ namespace {
 
 constexpr const char* kModule = "peers";
 constexpr uint32_t kJoinTimeoutMs = 1000;
+constexpr uint32_t kHeartbeatsPerProbe = 4;
 
 using network::Channel;
 using network::IncomingMessage;
@@ -62,6 +63,9 @@ void PeersModule::registerHandlers() {
     });
     network_.registerHandler(MessageType::Heartbeat, [this](const IncomingMessage& incoming) {
         handleHeartbeat(incoming);
+    });
+    network_.registerHandler(MessageType::HeartbeatProbe, [this](const IncomingMessage& incoming) {
+        handleHeartbeatProbe(incoming);
     });
     network_.registerHandler(MessageType::NodeDown, [this](const IncomingMessage& incoming) {
         handleNodeDown(incoming);
@@ -142,12 +146,31 @@ void PeersModule::handleNodeJoin(const IncomingMessage& incoming) {
     network_.reply(incoming, std::move(response));
 }
 
+void PeersModule::markHeardFrom(uint32_t nodeId, uint64_t freeMemoryBytes) {
+    if (nodeId != selfNodeId_ && nodeTable_.markActive(nodeId, freeMemoryBytes, Clock::now())) {
+        common::logInfo(kModule, common::fromNode(nodeId), "node %u is active", nodeId);
+    }
+}
+
+HeartbeatPayload PeersModule::currentHeartbeat() {
+    return HeartbeatPayload{selfNodeId_, freeMemoryProvider_()};
+}
+
 void PeersModule::handleHeartbeat(const IncomingMessage& incoming) {
     const auto heartbeat = decodeHeartbeat(incoming.message.payload);
-    if (heartbeat && heartbeat->nodeId != selfNodeId_ &&
-        nodeTable_.markActive(heartbeat->nodeId, heartbeat->freeMemoryBytes, Clock::now())) {
-        common::logInfo(kModule, common::fromNode(heartbeat->nodeId), "node %u is active", heartbeat->nodeId);
+    if (heartbeat) {
+        markHeardFrom(heartbeat->nodeId, heartbeat->freeMemoryBytes);
     }
+}
+
+void PeersModule::handleHeartbeatProbe(const IncomingMessage& incoming) {
+    const auto probe = decodeHeartbeat(incoming.message.payload);
+    if (!probe || probe->nodeId == selfNodeId_) {
+        return;
+    }
+    markHeardFrom(probe->nodeId, probe->freeMemoryBytes);
+    network_.send(probe->nodeId, Channel::Heartbeat,
+                  makeMessage(MessageType::Heartbeat, encodeHeartbeat(currentHeartbeat())));
 }
 
 void PeersModule::handleNodeDown(const IncomingMessage& incoming) {
@@ -176,12 +199,13 @@ void PeersModule::startHeartbeat() {
         return;
     }
     heartbeatThread_ = std::thread(&PeersModule::heartbeatLoop, this);
+    probeThread_ = std::thread(&PeersModule::probeLoop, this);
 }
 
 void PeersModule::heartbeatLoop() {
     const auto timeout = std::chrono::seconds(config_.heartbeatTimeoutSec);
     while (heartbeatRunning_.load()) {
-        const HeartbeatPayload payload{selfNodeId_, freeMemoryProvider_()};
+        const HeartbeatPayload payload = currentHeartbeat();
         nodeTable_.markActive(selfNodeId_, payload.freeMemoryBytes, Clock::now());
         for (uint32_t activeNodeId : nodeTable_.activeNodeIds()) {
             if (activeNodeId != selfNodeId_) {
@@ -193,6 +217,21 @@ void PeersModule::heartbeatLoop() {
             declareNodeDown(expiredNodeId);
         }
         heartbeatStop_.waitFor(config_.heartbeatIntervalMs);
+    }
+}
+
+void PeersModule::probeLoop() {
+    while (heartbeatRunning_.load()) {
+        probeStop_.waitFor(config_.heartbeatIntervalMs * kHeartbeatsPerProbe);
+        if (!heartbeatRunning_.load()) {
+            return;
+        }
+        for (const settings::NodeConfig& node : config_.nodes) {
+            if (node.nodeId != selfNodeId_ && !nodeTable_.isActive(node.nodeId)) {
+                network_.send(node.nodeId, Channel::Heartbeat,
+                              makeMessage(MessageType::HeartbeatProbe, encodeHeartbeat(currentHeartbeat())));
+            }
+        }
     }
 }
 
@@ -211,7 +250,9 @@ void PeersModule::leaveCluster() {
         return;
     }
     heartbeatStop_.post();
+    probeStop_.post();
     heartbeatThread_.join();
+    probeThread_.join();
     for (uint32_t activeNodeId : nodeTable_.activeNodeIds()) {
         if (activeNodeId != selfNodeId_) {
             network_.send(activeNodeId, Channel::Main, makeMessage(MessageType::NodeLeave, encodeNodeId(selfNodeId_)));

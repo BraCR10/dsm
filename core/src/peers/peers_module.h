@@ -9,6 +9,7 @@
 #include "dsm/dsm.h"
 #include "network/network_module.h"
 #include "peers/node_table.h"
+#include "peers/peer_messages.h"
 #include "settings/cluster_config.h"
 #include "sync/semaphore.h"
 
@@ -38,8 +39,12 @@ private:
     void handleNodeJoin(const network::IncomingMessage& incoming);
     void handleNodeJoinAck(uint32_t reporterNodeId, const std::vector<NodeRecord>& nodes);
     void handleHeartbeat(const network::IncomingMessage& incoming);
+    void handleHeartbeatProbe(const network::IncomingMessage& incoming);
     void handleNodeDown(const network::IncomingMessage& incoming);
     void heartbeatLoop();
+    void probeLoop();
+    void markHeardFrom(uint32_t nodeId, uint64_t freeMemoryBytes);
+    HeartbeatPayload currentHeartbeat();
     void declareNodeDown(uint32_t nodeId);
 
     const settings::ClusterConfig& config_;
@@ -50,7 +55,9 @@ private:
     NodeTable nodeTable_;
     std::atomic<bool> heartbeatRunning_{false};
     sync::Semaphore heartbeatStop_;
+    sync::Semaphore probeStop_;
     std::thread heartbeatThread_;
+    std::thread probeThread_;
 };
 
 }  // namespace dsm::peers
