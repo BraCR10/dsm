@@ -19,7 +19,7 @@ namespace dsm::api {
 namespace {
 
 constexpr const char* kModule = "api";
-constexpr uint32_t kLocalRequestTimeoutMs = 15000;
+constexpr uint32_t kLocalRequestTimeoutMs = 45000;
 constexpr uint32_t kWaitUntilAnsweredMs = std::numeric_limits<uint32_t>::max();
 
 using network::makeMessage;

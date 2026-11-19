@@ -14,9 +14,9 @@ namespace dsm::memory {
 namespace {
 
 constexpr const char* kModule = "memory";
-constexpr uint32_t kPageRequestTimeoutMs = 10000;
-constexpr uint32_t kInvalidateTimeoutMs = 2000;
-constexpr uint32_t kRecallTimeoutMs = 2000;
+constexpr uint32_t kPageRequestTimeoutMs = 30000;
+constexpr uint32_t kInvalidateTimeoutMs = 5000;
+constexpr uint32_t kRecallTimeoutMs = 10000;
 constexpr int kRecallAttempts = 200;
 constexpr useconds_t kRecallRetryDelayMicroseconds = 5000;
 constexpr int kFetchAttempts = 1000;

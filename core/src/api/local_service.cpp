@@ -14,7 +14,7 @@ namespace dsm::api {
 namespace {
 
 constexpr const char* kModule = "api";
-constexpr uint32_t kProtectionTimeoutMs = 2000;
+constexpr uint32_t kProtectionTimeoutMs = 4000;
 
 using network::makeMessage;
 using network::Message;
