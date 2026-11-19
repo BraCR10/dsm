@@ -19,6 +19,7 @@ public:
     void arrive(uint32_t barrierId, const SyncParticipant& participant, SyncCompletion completion);
     DsmStatus destroy(uint32_t barrierId);
     void releaseProcess(uint32_t nodeId, uint32_t processId);
+    void releaseNode(uint32_t nodeId);
 
 private:
     struct Waiter {

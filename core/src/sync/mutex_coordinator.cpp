@@ -23,6 +23,8 @@ void MutexCoordinator::lock(uint32_t mutexId, const SyncParticipant& requester, 
         const auto found = mutexes_.find(mutexId);
         if (found == mutexes_.end()) {
             immediateStatus = DSM_ERR_NOT_FOUND;
+        } else if (found->second.ownerNodeLost) {
+            immediateStatus = DSM_ERR_NODE_UNAVAILABLE;
         } else if (found->second.owner && *found->second.owner == requester) {
             immediateStatus = DSM_ERR_DEADLOCK;
         } else if (found->second.owner) {
@@ -100,6 +102,33 @@ void MutexCoordinator::releaseProcess(uint32_t nodeId, uint32_t processId) {
     }
     for (Waiter& waiter : granted) {
         waiter.completion(DSM_OK);
+    }
+}
+
+void MutexCoordinator::releaseNode(uint32_t nodeId) {
+    std::vector<Waiter> failed;
+    {
+        LockGuard guard(tableMutex_);
+        for (auto& [mutexId, state] : mutexes_) {
+            std::deque<Waiter> remaining;
+            for (Waiter& waiter : state.waiters) {
+                if (waiter.participant.nodeId != nodeId) {
+                    remaining.push_back(std::move(waiter));
+                }
+            }
+            state.waiters.swap(remaining);
+            if (state.owner && state.owner->nodeId == nodeId) {
+                state.owner.reset();
+                state.ownerNodeLost = true;
+                for (Waiter& waiter : state.waiters) {
+                    failed.push_back(std::move(waiter));
+                }
+                state.waiters.clear();
+            }
+        }
+    }
+    for (Waiter& waiter : failed) {
+        waiter.completion(DSM_ERR_NODE_UNAVAILABLE);
     }
 }
 

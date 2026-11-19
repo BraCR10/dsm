@@ -26,6 +26,7 @@ NodeRuntime::NodeRuntime(settings::ClusterConfig config, uint32_t selfNodeId, ui
     sync_ = std::make_unique<sync::DistributedSyncModule>(selfNodeId_, *network_);
     localService_ = std::make_unique<LocalService>(config_, selfNodeId_, *memory_, *stats_, *peers_, *sync_);
     memory_->setAccessController(localService_.get());
+    peers_->setNodeDownListener([this](uint32_t nodeId) { sync_->releaseNode(nodeId); });
     memory_->setRemoteMemoryCandidates([this](uint64_t requiredBytes) {
         return peers_->nodeTable().nodesWithFreeMemory(requiredBytes, selfNodeId_);
     });

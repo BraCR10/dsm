@@ -23,6 +23,7 @@ public:
     DsmStatus unlock(uint32_t mutexId, const SyncParticipant& requester);
     DsmStatus destroy(uint32_t mutexId);
     void releaseProcess(uint32_t nodeId, uint32_t processId);
+    void releaseNode(uint32_t nodeId);
 
 private:
     struct Waiter {
@@ -33,6 +34,7 @@ private:
     struct MutexState {
         std::optional<SyncParticipant> owner;
         std::deque<Waiter> waiters;
+        bool ownerNodeLost = false;
     };
 
     std::optional<Waiter> passOwnership(MutexState& state);

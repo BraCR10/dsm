@@ -190,6 +190,7 @@ void PeersModule::handleNodeDown(const IncomingMessage& incoming) {
     }
     if (nodeTable_.markDown(*nodeId)) {
         network_.closeConnectionsTo(*nodeId);
+        notifyNodeDown(*nodeId);
         common::logInfo(kModule, common::fromNode(reporter), "node %u left the cluster (%s)", *nodeId, messageName);
     }
 }
@@ -235,9 +236,16 @@ void PeersModule::probeLoop() {
     }
 }
 
+void PeersModule::notifyNodeDown(uint32_t nodeId) {
+    if (nodeDownListener_) {
+        nodeDownListener_(nodeId);
+    }
+}
+
 void PeersModule::declareNodeDown(uint32_t nodeId) {
     common::logError(kModule, common::fromSelf(), "node %u missed its heartbeats and is considered down", nodeId);
     network_.closeConnectionsTo(nodeId);
+    notifyNodeDown(nodeId);
     for (uint32_t activeNodeId : nodeTable_.activeNodeIds()) {
         if (activeNodeId != selfNodeId_) {
             network_.send(activeNodeId, Channel::Main, makeMessage(MessageType::NodeDown, encodeNodeId(nodeId)));

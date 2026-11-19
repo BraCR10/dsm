@@ -116,6 +116,11 @@ void DistributedSyncModule::releaseProcess(uint32_t processId) {
     }
 }
 
+void DistributedSyncModule::releaseNode(uint32_t nodeId) {
+    mutexes_.releaseNode(nodeId);
+    barriers_.releaseNode(nodeId);
+}
+
 void DistributedSyncModule::sendToManager(MessageType type, uint32_t objectId, const SyncParticipant& participant,
                                           SyncCompletion completion) {
     sendToNode(managerOf(objectId), type, objectId, participant, std::move(completion));

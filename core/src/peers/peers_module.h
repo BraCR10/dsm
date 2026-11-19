@@ -16,6 +16,7 @@
 namespace dsm::peers {
 
 using FreeMemoryProvider = std::function<uint64_t()>;
+using NodeDownListener = std::function<void(uint32_t nodeId)>;
 
 class PeersModule {
 public:
@@ -32,6 +33,7 @@ public:
 
     bool isActive(uint32_t nodeId) { return nodeTable_.isActive(nodeId); }
     NodeTable& nodeTable() { return nodeTable_; }
+    void setNodeDownListener(NodeDownListener listener) { nodeDownListener_ = std::move(listener); }
 
 private:
     NodeRecord selfRecord() const;
@@ -46,12 +48,14 @@ private:
     void markHeardFrom(uint32_t nodeId, uint64_t freeMemoryBytes);
     HeartbeatPayload currentHeartbeat();
     void declareNodeDown(uint32_t nodeId);
+    void notifyNodeDown(uint32_t nodeId);
 
     const settings::ClusterConfig& config_;
     const uint32_t selfNodeId_;
     const uint64_t sharedMemoryBytes_;
     network::NetworkModule& network_;
     FreeMemoryProvider freeMemoryProvider_;
+    NodeDownListener nodeDownListener_;
     NodeTable nodeTable_;
     std::atomic<bool> heartbeatRunning_{false};
     sync::Semaphore heartbeatStop_;

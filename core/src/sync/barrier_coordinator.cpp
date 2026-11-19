@@ -70,4 +70,22 @@ void BarrierCoordinator::releaseProcess(uint32_t nodeId, uint32_t processId) {
     }
 }
 
+void BarrierCoordinator::releaseNode(uint32_t nodeId) {
+    std::vector<Waiter> failed;
+    {
+        LockGuard guard(tableMutex_);
+        for (auto& [barrierId, state] : barriers_) {
+            for (Waiter& waiter : state.waiters) {
+                if (waiter.participant.nodeId != nodeId) {
+                    failed.push_back(std::move(waiter));
+                }
+            }
+            state.waiters.clear();
+        }
+    }
+    for (Waiter& waiter : failed) {
+        waiter.completion(DSM_ERR_NODE_UNAVAILABLE);
+    }
+}
+
 }  // namespace dsm::sync

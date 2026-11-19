@@ -32,6 +32,7 @@ public:
     void destroyBarrier(uint32_t barrierId, SyncCompletion completion);
 
     void releaseProcess(uint32_t processId);
+    void releaseNode(uint32_t nodeId);
 
 private:
     bool isManagedHere(uint32_t objectId) const { return managerOf(objectId) == selfNodeId_; }
