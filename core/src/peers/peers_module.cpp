@@ -149,10 +149,22 @@ void PeersModule::handleHeartbeat(const IncomingMessage& incoming) {
 
 void PeersModule::handleNodeDown(const IncomingMessage& incoming) {
     const auto nodeId = decodeNodeId(incoming.message.payload);
-    if (nodeId && *nodeId != selfNodeId_ && nodeTable_.markDown(*nodeId)) {
+    if (!nodeId || *nodeId == selfNodeId_) {
+        return;
+    }
+    const uint32_t reporter = incoming.message.header.sourceNode;
+    const char* messageName = network::messageTypeName(incoming.message.type());
+    const bool reportedByAnotherNode = incoming.message.type() == MessageType::NodeDown;
+    if (reportedByAnotherNode &&
+        nodeTable_.isRecentlySeen(*nodeId, std::chrono::seconds(config_.heartbeatTimeoutSec), Clock::now())) {
+        common::logInfo(kModule, "ignoring %s for node %u reported by node %u: its heartbeats still arrive here",
+                        messageName, *nodeId, reporter);
+        return;
+    }
+    if (nodeTable_.markDown(*nodeId)) {
         network_.closeConnectionsTo(*nodeId);
-        common::logInfo(kModule, "node %u left the cluster (%s)", *nodeId,
-                        network::messageTypeName(incoming.message.type()));
+        common::logInfo(kModule, "node %u left the cluster (%s reported by node %u)", *nodeId, messageName,
+                        reporter);
     }
 }
 
