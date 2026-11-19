@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,7 @@ struct CounterWork {
     int mutexId = -1;
     int barrierId = -1;
     int iterations = 0;
+    std::atomic<int> firstError{0};
 };
 
 struct SharedCounter {
@@ -58,28 +60,62 @@ bool succeeded(const char* operation, int status) {
     return true;
 }
 
-void* incrementCounter(void* argument) {
-    const CounterWork* work = static_cast<const CounterWork*>(argument);
-    dsm_barrier(work->barrierId);
-    for (int iteration = 0; iteration < work->iterations; ++iteration) {
-        dsm_mutex_lock(work->mutexId);
-        *work->counter += 1;
-        dsm_mutex_unlock(work->mutexId);
+bool keepsRunning(CounterWork& work, const char* operation, int status) {
+    if (status >= 0) {
+        return true;
     }
-    dsm_barrier(work->barrierId);
+    int noError = 0;
+    if (work.firstError.compare_exchange_strong(noError, status)) {
+        std::printf("%s failed with status %d, stopping this node's threads\n", operation, status);
+        std::fflush(stdout);
+    }
+    return false;
+}
+
+void* incrementCounter(void* argument) {
+    CounterWork& work = *static_cast<CounterWork*>(argument);
+    if (!keepsRunning(work, "dsm_barrier", dsm_barrier(work.barrierId))) {
+        return nullptr;
+    }
+    for (int iteration = 0; iteration < work.iterations && work.firstError.load() == 0; ++iteration) {
+        if (!keepsRunning(work, "dsm_mutex_lock", dsm_mutex_lock(work.mutexId))) {
+            return nullptr;
+        }
+        *work.counter += 1;
+        if (!keepsRunning(work, "dsm_mutex_unlock", dsm_mutex_unlock(work.mutexId))) {
+            return nullptr;
+        }
+    }
+    if (work.firstError.load() == 0) {
+        keepsRunning(work, "dsm_barrier", dsm_barrier(work.barrierId));
+    }
     return nullptr;
 }
 
-long long runIncrements(const SharedCounter& shared, int threadCount, int iterations) {
-    CounterWork work{shared.counter, shared.mutexId, shared.workBarrierId, iterations};
-    std::vector<pthread_t> threads(static_cast<size_t>(threadCount));
-    for (pthread_t& thread : threads) {
-        pthread_create(&thread, nullptr, incrementCounter, &work);
+bool runIncrements(const SharedCounter& shared, int threadCount, int iterations, long long& outResult) {
+    CounterWork work;
+    work.counter = shared.counter;
+    work.mutexId = shared.mutexId;
+    work.barrierId = shared.workBarrierId;
+    work.iterations = iterations;
+    std::vector<pthread_t> threads;
+    for (int index = 0; index < threadCount; ++index) {
+        pthread_t thread;
+        if (pthread_create(&thread, nullptr, incrementCounter, &work) != 0) {
+            std::printf("pthread_create failed\n");
+            work.firstError.store(DSM_ERR_INTERNAL);
+            break;
+        }
+        threads.push_back(thread);
     }
     for (pthread_t& thread : threads) {
         pthread_join(thread, nullptr);
     }
-    return *shared.counter;
+    if (work.firstError.load() != 0) {
+        return false;
+    }
+    outResult = *shared.counter;
+    return true;
 }
 
 int runCounter(int threadCount, int iterations, int nodeCount) {
@@ -102,11 +138,15 @@ int runCounter(int threadCount, int iterations, int nodeCount) {
     }
     std::fflush(stdout);
     const Clock::time_point start = Clock::now();
-    const long long result = runIncrements(shared, threadCount, iterations);
+    long long result = 0;
+    if (!runIncrements(shared, threadCount, iterations, result)) {
+        std::printf("The run was interrupted because a node became unavailable. Start it again.\n");
+        return 1;
+    }
     const long long expected = static_cast<long long>(threadCount) * iterations * nodeCount;
     std::printf("Counter %lld, expected %lld, %s (%.2f s)\n", result, expected,
                 result == expected ? "correct" : "WRONG", secondsSince(start));
-    dsm_barrier(shared.doneBarrierId);
+    succeeded("dsm_barrier", dsm_barrier(shared.doneBarrierId));
     dsm_mutex_destroy(shared.mutexId);
     dsm_barrier_destroy(shared.workBarrierId);
     dsm_barrier_destroy(shared.doneBarrierId);
@@ -117,10 +157,13 @@ int runCounter(int threadCount, int iterations, int nodeCount) {
 int runJoin(const SharedCounter& shared, int threadCount, int iterations) {
     std::printf("Joining the shared counter at %p\n", static_cast<void*>(shared.counter));
     std::fflush(stdout);
-    const long long result = runIncrements(shared, threadCount, iterations);
+    long long result = 0;
+    if (!runIncrements(shared, threadCount, iterations, result)) {
+        std::printf("The run was interrupted because a node became unavailable. Start it again.\n");
+        return 1;
+    }
     std::printf("Counter seen by this node after every node finished: %lld\n", result);
-    dsm_barrier(shared.doneBarrierId);
-    return 0;
+    return succeeded("dsm_barrier", dsm_barrier(shared.doneBarrierId)) ? 0 : 1;
 }
 
 int runHost() {
@@ -137,13 +180,19 @@ int runHost() {
     if (!succeeded("dsm_barrier", dsm_barrier(barrierId))) {
         return 1;
     }
-    dsm_mutex_lock(mutexId);
+    if (!succeeded("dsm_mutex_lock", dsm_mutex_lock(mutexId))) {
+        return 1;
+    }
     std::printf("Both arrived. Holding the mutex for %d s\n", kHostHoldSeconds);
     std::fflush(stdout);
     sleep(kHostHoldSeconds);
-    dsm_mutex_unlock(mutexId);
+    if (!succeeded("dsm_mutex_unlock", dsm_mutex_unlock(mutexId))) {
+        return 1;
+    }
     std::printf("Mutex released\n");
-    dsm_barrier(barrierId);
+    if (!succeeded("dsm_barrier", dsm_barrier(barrierId))) {
+        return 1;
+    }
     std::printf("Guest finished. Destroying the mutex and the barrier\n");
     succeeded("dsm_mutex_destroy", dsm_mutex_destroy(mutexId));
     succeeded("dsm_barrier_destroy", dsm_barrier_destroy(barrierId));
@@ -164,9 +213,10 @@ int runGuest(int mutexId, int barrierId) {
         return 1;
     }
     std::printf("Mutex acquired after waiting %.2f s\n", secondsSince(start));
-    dsm_mutex_unlock(mutexId);
-    dsm_barrier(barrierId);
-    return 0;
+    if (!succeeded("dsm_mutex_unlock", dsm_mutex_unlock(mutexId))) {
+        return 1;
+    }
+    return succeeded("dsm_barrier", dsm_barrier(barrierId)) ? 0 : 1;
 }
 
 int runCommand(int argumentCount, char** arguments, int first) {
