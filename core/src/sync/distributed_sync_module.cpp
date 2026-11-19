@@ -109,8 +109,8 @@ void DistributedSyncModule::releaseProcess(uint32_t processId) {
     mutexes_.releaseProcess(selfNodeId_, processId);
     barriers_.releaseProcess(selfNodeId_, processId);
     for (uint32_t managerNodeId : takeRemoteManagersOf(processId)) {
-        common::logInfo(kModule, "asking node %u to release the mutexes and barrier waits of closed process %u",
-                        managerNodeId, processId);
+        common::logInfo(kModule, common::fromProcess(processId),
+                        "asking node %u to release the mutexes and barrier waits of the closed process", managerNodeId);
         sendToNode(managerNodeId, MessageType::SyncReleaseProcess, 0, SyncParticipant{selfNodeId_, processId, 0},
                    [](DsmStatus) {});
     }

@@ -62,7 +62,7 @@ int dsm_init(const char* config_path, int node_id, size_t shared_memory_bytes) {
     dsm::settings::ClusterConfig config;
     const dsm::settings::ConfigResult result = dsm::settings::loadClusterConfig(config_path, config);
     if (result.status != DSM_OK) {
-        dsm::common::logError("api", "%s", result.errorMessage.c_str());
+        dsm::common::logError("api", dsm::common::fromSelf(), "%s", result.errorMessage.c_str());
         return result.status;
     }
     auto candidate = std::make_unique<dsm::api::ClientRuntime>(std::move(config));
@@ -104,7 +104,7 @@ void dsm_free(void* ptr) {
     }
     dsm::api::ClientRuntime* client = activeRuntime();
     if (client == nullptr || client->release(ptr) != DSM_OK) {
-        dsm::common::logFatal("api", "dsm_free received an invalid pointer %p", ptr);
+        dsm::common::logFatal("api", dsm::common::fromSelf(), "dsm_free received an invalid pointer %p", ptr);
     }
 }
 

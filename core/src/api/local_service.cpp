@@ -44,12 +44,12 @@ DsmStatus LocalService::start() {
     const std::string path = network::nodeSocketPath(selfNodeId_);
     listenerDescriptor_ = network::listenOnUnixSocket(path);
     if (listenerDescriptor_ < 0) {
-        common::logError(kModule, "cannot listen on %s", path.c_str());
+        common::logError(kModule, common::fromSelf(), "cannot listen on %s", path.c_str());
         return DSM_ERR_NETWORK;
     }
     running_.store(true);
     acceptThread_ = std::thread(&LocalService::acceptLoop, this);
-    common::logInfo(kModule, "applications attach through %s", path.c_str());
+    common::logInfo(kModule, common::fromSelf(), "applications attach through %s", path.c_str());
     return DSM_OK;
 }
 
@@ -94,6 +94,7 @@ void LocalService::acceptLoop() {
 void LocalService::onClientClosed(Client& client) {
     client.closed.store(true);
     if (client.attached.load()) {
+        common::logInfo(kModule, common::fromProcess(client.processId), "process detached");
         sync_.releaseProcess(client.processId);
     }
 }
@@ -112,7 +113,6 @@ void LocalService::removeClosedClients() {
         }
     }
     for (const auto& client : closedClients) {
-        common::logInfo(kModule, "process %u detached", client->processId);
         client->channel->stop();
     }
 }
@@ -200,8 +200,8 @@ void LocalService::handleRequest(Client& client, const Message& request) {
             handleSyncOperation(client, request);
             return;
         default:
-            common::logError(kModule, "unexpected %s from process %u", network::messageTypeName(request.type()),
-                             client.processId);
+            common::logError(kModule, common::fromProcess(client.processId), "unexpected %s",
+                             network::messageTypeName(request.type()));
     }
 }
 
@@ -217,7 +217,7 @@ void LocalService::handleAttach(Client& client, const Message& request) {
     }
     client.processId = attach->processId;
     client.attached.store(true);
-    common::logInfo(kModule, "process %u attached", client.processId);
+    common::logInfo(kModule, common::fromProcess(client.processId), "process attached");
     replyStatus(client, request, MessageType::LocalAttachAck, DSM_OK, encodeValue(selfNodeId_));
 }
 
@@ -331,8 +331,8 @@ sync::SyncCompletion LocalService::replyOrUnlockWhenGranted(Client& client, cons
             return;
         }
         if (status == DSM_OK) {
-            common::logInfo(kModule, "releasing mutex 0x%x granted to closed process %u", mutexId,
-                            requester.processId);
+            common::logInfo(kModule, common::fromProcess(requester.processId),
+                            "releasing mutex 0x%x granted after the process closed", mutexId);
             sync_.unlockMutex(mutexId, requester, [](DsmStatus) {});
         }
     };

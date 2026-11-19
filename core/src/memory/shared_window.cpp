@@ -29,13 +29,15 @@ DsmStatus SharedWindow::createForNode(const std::string& name, uint64_t size) {
     shm_unlink(name.c_str());
     descriptor_ = shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
     if (descriptor_ < 0 || ftruncate(descriptor_, static_cast<off_t>(size)) != 0) {
-        common::logError(kModule, "cannot create shared memory %s: %s", name.c_str(), std::strerror(errno));
+        common::logError(kModule, common::fromSelf(),
+                         "cannot create shared memory %s: %s", name.c_str(), std::strerror(errno));
         close();
         return DSM_ERR_NO_MEMORY;
     }
     void* mapping = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NORESERVE, descriptor_, 0);
     if (mapping == MAP_FAILED) {
-        common::logError(kModule, "cannot map shared memory %s: %s", name.c_str(), std::strerror(errno));
+        common::logError(kModule, common::fromSelf(),
+                         "cannot map shared memory %s: %s", name.c_str(), std::strerror(errno));
         close();
         return DSM_ERR_NO_MEMORY;
     }

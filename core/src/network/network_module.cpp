@@ -58,7 +58,7 @@ DsmStatus NetworkModule::start(uint16_t mainPort, uint16_t heartbeatPort) {
     const int mainListener = openListener(mainPort);
     const int heartbeatListener = openListener(heartbeatPort);
     if (mainListener < 0 || heartbeatListener < 0) {
-        common::logError(kModule, "cannot listen on ports %u and %u", mainPort, heartbeatPort);
+        common::logError(kModule, common::fromSelf(), "cannot listen on ports %u and %u", mainPort, heartbeatPort);
         if (mainListener >= 0) {
             close(mainListener);
         }
@@ -73,7 +73,8 @@ DsmStatus NetworkModule::start(uint16_t mainPort, uint16_t heartbeatPort) {
     threads_.emplace_back(&NetworkModule::acceptLoop, this, mainListener, Channel::Main);
     threads_.emplace_back(&NetworkModule::acceptLoop, this, heartbeatListener, Channel::Heartbeat);
     threads_.emplace_back(&NetworkModule::dispatchLoop, this);
-    common::logInfo(kModule, "listening on main port %u and heartbeat port %u", mainPort, heartbeatPort);
+    common::logInfo(kModule, common::fromSelf(),
+                    "listening on main port %u and heartbeat port %u", mainPort, heartbeatPort);
     return DSM_OK;
 }
 
@@ -171,8 +172,8 @@ void NetworkModule::dispatchLoop() {
         }
         const auto handler = handlers_.find(incoming.message.header.type);
         if (handler == handlers_.end()) {
-            common::logError(kModule, "no handler for %s from node %u", messageTypeName(incoming.message.type()),
-                             incoming.message.header.sourceNode);
+            common::logError(kModule, common::fromNode(incoming.message.header.sourceNode), "no handler for %s",
+                             messageTypeName(incoming.message.type()));
             continue;
         }
         handler->second(incoming);

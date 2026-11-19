@@ -59,7 +59,7 @@ MemoryModule::MemoryModule(const settings::ClusterConfig& config, uint32_t selfN
 DsmStatus MemoryModule::start() {
     const DsmStatus status = window_.createForNode(nodeSharedMemoryName(selfNodeId_), addressMap_.windowSize());
     if (status == DSM_OK) {
-        common::logInfo(kModule, "shared window %s ready, local region at 0x%llx with %llu pages",
+        common::logInfo(kModule, common::fromSelf(), "shared window %s ready, local region at 0x%llx with %llu pages",
                         nodeSharedMemoryName(selfNodeId_).c_str(),
                         static_cast<unsigned long long>(addressMap_.regionStart(selfNodeId_)),
                         static_cast<unsigned long long>(registry_.totalPageCount()));
@@ -151,13 +151,15 @@ uintptr_t MemoryModule::allocateOnAnotherNode(uint64_t pageCount, uint32_t proce
             kMemoryRequestTimeoutMs, response);
         const auto address = decodeAddress(response.payload);
         if (status == DSM_OK && response.header.status == DSM_OK && address) {
-            common::logInfo(kModule, "local memory is full; node %u granted %llu pages at 0x%llx", candidate,
+            common::logInfo(kModule, common::fromNode(candidate),
+                            "granted %llu pages at 0x%llx because local memory is full",
                             static_cast<unsigned long long>(pageCount), static_cast<unsigned long long>(*address));
             outStatus = DSM_OK;
             return static_cast<uintptr_t>(*address);
         }
     }
-    common::logError(kModule, "no node has %llu free pages", static_cast<unsigned long long>(pageCount));
+    common::logError(kModule, common::fromSelf(),
+                     "no node has %llu free pages", static_cast<unsigned long long>(pageCount));
     return 0;
 }
 
@@ -298,7 +300,8 @@ void MemoryModule::resolveRemoteFault(uint64_t pageId, uint32_t homeNode, Access
         }
         PageTable::Operation operation(msi_.pageTable(), pageId, homeNode);
         if (!msi::isNewerVersion(page.grant.version, operation.read().version)) {
-            common::logInfo(kModule, "page %llu changed while it was requested; requesting it again",
+            common::logInfo(kModule, common::fromSelf(),
+                            "page %llu changed while it was requested, requesting it again",
                             static_cast<unsigned long long>(pageId));
             continue;
         }
@@ -314,7 +317,8 @@ void MemoryModule::resolveRemoteFault(uint64_t pageId, uint32_t homeNode, Access
         replyWhilePageIsLocked({DSM_OK, pageId, protectionFor(grantedState)});
         return;
     }
-    common::logError(kModule, "page %llu stayed busy after %d requests", static_cast<unsigned long long>(pageId),
+    common::logError(kModule, common::fromSelf(),
+                     "page %llu stayed busy after %d requests", static_cast<unsigned long long>(pageId),
                      kFetchAttempts);
     replyWhilePageIsLocked({DSM_ERR_BUSY, pageId, PROT_NONE});
 }
@@ -327,8 +331,9 @@ DsmStatus MemoryModule::requestPageFromHome(uint32_t homeNode, uint64_t pageId, 
                          makeMessage(MessageType::PageRequest, msi::encodePageRequest({pageId, access})),
                          kPageRequestTimeoutMs, response);
     if (status != DSM_OK) {
-        common::logError(kModule, "page %llu is unavailable: home node %u did not answer",
-                         static_cast<unsigned long long>(pageId), homeNode);
+        common::logError(kModule, common::fromNode(homeNode),
+                         "page %llu is unavailable because its home node did not answer",
+                         static_cast<unsigned long long>(pageId));
         return DSM_ERR_PAGE_LOST;
     }
     if (response.header.status != DSM_OK) {
@@ -351,8 +356,9 @@ DsmStatus MemoryModule::recallFromHolder(PageTable::Operation& operation, uint64
                              makeMessage(MessageType::PageRecall, msi::encodePageRequest({pageId, access})),
                              kRecallTimeoutMs, response);
         if (status != DSM_OK) {
-            common::logError(kModule, "page %llu is lost: node %u holds it modified and did not answer PAGE_RECALL",
-                             static_cast<unsigned long long>(pageId), holder);
+            common::logError(kModule, common::fromNode(holder),
+                             "page %llu is lost because its modified holder did not answer PAGE_RECALL",
+                             static_cast<unsigned long long>(pageId));
             return DSM_ERR_PAGE_LOST;
         }
         if (response.header.status == DSM_ERR_BUSY) {
@@ -370,7 +376,7 @@ DsmStatus MemoryModule::recallFromHolder(PageTable::Operation& operation, uint64
         counters_.pagesReceived.fetch_add(1);
         return DSM_OK;
     }
-    common::logError(kModule, "node %u kept page %llu busy during PAGE_RECALL", holder,
+    common::logError(kModule, common::fromNode(holder), "page %llu stayed busy during PAGE_RECALL",
                      static_cast<unsigned long long>(pageId));
     return DSM_ERR_PAGE_LOST;
 }
@@ -386,7 +392,8 @@ void MemoryModule::invalidateNodes(PageTable::Operation& operation, uint64_t pag
             node, Channel::Main, makeMessage(MessageType::Invalidate, msi::encodePageVersion({pageId, version})),
             kInvalidateTimeoutMs, response);
         if (status != DSM_OK) {
-            common::logError(kModule, "node %u did not confirm INVALIDATE for page %llu; its copy is dropped", node,
+            common::logError(kModule, common::fromNode(node),
+                             "INVALIDATE for page %llu was not confirmed, its copy is dropped",
                              static_cast<unsigned long long>(pageId));
         }
         counters_.invalidations.fetch_add(1);
@@ -435,9 +442,10 @@ void MemoryModule::handleMemoryRequest(const IncomingMessage& incoming) {
     const uintptr_t address = allocateLocally(request->pageCount, request->processId, status);
     response.header.status = status;
     if (status == DSM_OK) {
-        common::logInfo(kModule, "granted %llu pages at 0x%llx to process %u of node %u",
+        common::logInfo(kModule, common::fromNode(incoming.message.header.sourceNode),
+                        "granted %llu pages at 0x%llx to remote process %u",
                         static_cast<unsigned long long>(request->pageCount), static_cast<unsigned long long>(address),
-                        request->processId, incoming.message.header.sourceNode);
+                        request->processId);
         response.payload = encodeAddress(address);
     }
     network_.reply(incoming, std::move(response));

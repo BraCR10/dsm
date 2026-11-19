@@ -36,7 +36,7 @@ private:
     NodeRecord selfRecord() const;
     NodeRecord recordFromConfig(const settings::NodeConfig& node) const;
     void handleNodeJoin(const network::IncomingMessage& incoming);
-    void handleNodeJoinAck(const std::vector<NodeRecord>& nodes);
+    void handleNodeJoinAck(uint32_t reporterNodeId, const std::vector<NodeRecord>& nodes);
     void handleHeartbeat(const network::IncomingMessage& incoming);
     void handleNodeDown(const network::IncomingMessage& incoming);
     void heartbeatLoop();

@@ -85,22 +85,24 @@ DsmStatus PeersModule::joinCluster() {
             continue;
         }
         if (response.header.status != DSM_OK) {
-            common::logError(kModule, "node %u rejected the join with status %d", node.nodeId, response.header.status);
+            common::logError(kModule, common::fromNode(node.nodeId),
+                             "join rejected with status %d", response.header.status);
             return static_cast<DsmStatus>(response.header.status);
         }
         const auto nodes = decodeNodeList(response.payload);
         if (nodes) {
-            handleNodeJoinAck(*nodes);
+            handleNodeJoinAck(node.nodeId, *nodes);
         }
     }
-    common::logInfo(kModule, "joined the cluster with %zu active nodes", nodeTable_.activeNodeIds().size());
+    common::logInfo(kModule, common::fromSelf(),
+                    "joined the cluster with %zu active nodes", nodeTable_.activeNodeIds().size());
     return DSM_OK;
 }
 
-void PeersModule::handleNodeJoinAck(const std::vector<NodeRecord>& nodes) {
+void PeersModule::handleNodeJoinAck(uint32_t reporterNodeId, const std::vector<NodeRecord>& nodes) {
     for (const NodeRecord& node : nodes) {
         if (node.nodeId != selfNodeId_ && nodeTable_.markActive(node.nodeId, node.freeMemoryBytes, Clock::now())) {
-            common::logInfo(kModule, "node %u is active", node.nodeId);
+            common::logInfo(kModule, common::fromNode(reporterNodeId), "node %u is active", node.nodeId);
         }
     }
 }
@@ -118,7 +120,8 @@ void PeersModule::handleNodeJoin(const IncomingMessage& incoming) {
         response.header.status = DSM_ERR_DUPLICATE_NODE;
     }
     if (response.header.status != DSM_OK) {
-        common::logError(kModule, "rejected join from node %u with status %d", incoming.message.header.sourceNode,
+        common::logError(kModule, common::fromNode(incoming.message.header.sourceNode),
+                         "rejected its join with status %d",
                          response.header.status);
         network_.reply(incoming, std::move(response));
         return;
@@ -127,7 +130,7 @@ void PeersModule::handleNodeJoin(const IncomingMessage& incoming) {
     record.active = false;
     nodeTable_.upsert(record);
     nodeTable_.markActive(record.nodeId, record.freeMemoryBytes, Clock::now());
-    common::logInfo(kModule, "node %u joined the cluster", record.nodeId);
+    common::logInfo(kModule, common::fromNode(record.nodeId), "node %u joined the cluster", record.nodeId);
 
     std::vector<NodeRecord> activeNodes;
     for (const NodeRecord& node : nodeTable_.snapshot()) {
@@ -143,7 +146,7 @@ void PeersModule::handleHeartbeat(const IncomingMessage& incoming) {
     const auto heartbeat = decodeHeartbeat(incoming.message.payload);
     if (heartbeat && heartbeat->nodeId != selfNodeId_ &&
         nodeTable_.markActive(heartbeat->nodeId, heartbeat->freeMemoryBytes, Clock::now())) {
-        common::logInfo(kModule, "node %u is active", heartbeat->nodeId);
+        common::logInfo(kModule, common::fromNode(heartbeat->nodeId), "node %u is active", heartbeat->nodeId);
     }
 }
 
@@ -157,14 +160,14 @@ void PeersModule::handleNodeDown(const IncomingMessage& incoming) {
     const bool reportedByAnotherNode = incoming.message.type() == MessageType::NodeDown;
     if (reportedByAnotherNode &&
         nodeTable_.isRecentlySeen(*nodeId, std::chrono::seconds(config_.heartbeatTimeoutSec), Clock::now())) {
-        common::logInfo(kModule, "ignoring %s for node %u reported by node %u: its heartbeats still arrive here",
-                        messageName, *nodeId, reporter);
+        common::logInfo(kModule, common::fromNode(reporter),
+                        "ignoring %s for node %u because its heartbeats still arrive",
+                        messageName, *nodeId);
         return;
     }
     if (nodeTable_.markDown(*nodeId)) {
         network_.closeConnectionsTo(*nodeId);
-        common::logInfo(kModule, "node %u left the cluster (%s reported by node %u)", *nodeId, messageName,
-                        reporter);
+        common::logInfo(kModule, common::fromNode(reporter), "node %u left the cluster (%s)", *nodeId, messageName);
     }
 }
 
@@ -194,7 +197,7 @@ void PeersModule::heartbeatLoop() {
 }
 
 void PeersModule::declareNodeDown(uint32_t nodeId) {
-    common::logError(kModule, "node %u missed its heartbeats and is considered down", nodeId);
+    common::logError(kModule, common::fromSelf(), "node %u missed its heartbeats and is considered down", nodeId);
     network_.closeConnectionsTo(nodeId);
     for (uint32_t activeNodeId : nodeTable_.activeNodeIds()) {
         if (activeNodeId != selfNodeId_) {

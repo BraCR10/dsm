@@ -125,7 +125,8 @@ DsmStatus ClientRuntime::callWithTimeout(MessageType type, std::vector<uint8_t> 
 
 void ClientRuntime::protectPage(uint64_t pageId, int protection) {
     if (mprotect(reinterpret_cast<void*>(addressMap_.pageAddress(pageId)), config_.pageSize, protection) != 0) {
-        common::logFatal(kModule, "mprotect failed for page %llu: %s", static_cast<unsigned long long>(pageId),
+        common::logFatal(kModule, common::fromSelf(),
+                         "mprotect failed for page %llu: %s", static_cast<unsigned long long>(pageId),
                          std::strerror(errno));
     }
 }
@@ -167,7 +168,7 @@ void ClientRuntime::resolveFault(const memory::FaultRequest& fault) {
     Message response;
     const DsmStatus status = call(MessageType::LocalFault, encodeFault({fault.address, fault.isWrite}), response);
     if (status != DSM_OK) {
-        common::logFatal(kModule, "%s access to %p failed: %s", fault.isWrite ? "write" : "read",
+        common::logFatal(kModule, common::fromSelf(), "%s access to %p failed: %s", fault.isWrite ? "write" : "read",
                          reinterpret_cast<void*>(fault.address), faultFailureReason(status));
     }
 }

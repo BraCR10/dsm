@@ -73,7 +73,7 @@ void NodeRuntime::shutdown() {
     peers_->leaveCluster();
     network_->stop();
     memory_->stop();
-    common::logInfo("api", "node %u stopped", selfNodeId_);
+    common::logInfo("api", common::fromSelf(), "node stopped");
 }
 
 }  // namespace dsm::api

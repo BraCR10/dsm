@@ -6,9 +6,12 @@
 #include <string>
 
 #include "api/node_runtime.h"
+#include "common/log.h"
 #include "settings/cluster_config.h"
 
 namespace {
+
+constexpr const char* kModule = "node";
 
 struct Options {
     std::string configPath = "config/cluster.json";
@@ -67,18 +70,20 @@ int main(int argumentCount, char** arguments) {
     dsm::settings::ClusterConfig config;
     const dsm::settings::ConfigResult result = dsm::settings::loadClusterConfig(options.configPath, config);
     if (result.status != DSM_OK) {
-        std::printf("%s\n", result.errorMessage.c_str());
+        dsm::common::logError(kModule, dsm::common::fromSelf(), "%s", result.errorMessage.c_str());
         return 1;
     }
     const std::optional<uint32_t> nodeId = options.nodeId ? options.nodeId : dsm::api::detectLocalNodeId(config);
     const dsm::settings::NodeConfig* self = nodeId ? config.findNode(*nodeId) : nullptr;
     if (self == nullptr) {
-        std::printf("No configuration entry is available for this machine\n");
+        dsm::common::logError(kModule, dsm::common::fromSelf(), "no configuration entry is available for this machine");
         return 1;
     }
+    dsm::common::setLogNodeId(*nodeId);
     const uint64_t memoryBytes = options.memoryBytes != 0 ? options.memoryBytes : self->memorySize;
     if (memoryBytes % config.pageSize != 0 || memoryBytes > config.nodeRangeSpacing) {
-        std::printf("--memory must be a multiple of page_size and fit in node_range_spacing\n");
+        dsm::common::logError(kModule, dsm::common::fromSelf(),
+                              "--memory must be a multiple of page_size and fit in node_range_spacing");
         return 1;
     }
 
@@ -91,12 +96,12 @@ int main(int argumentCount, char** arguments) {
     dsm::api::NodeRuntime node(std::move(config), *nodeId, memoryBytes);
     const DsmStatus status = node.start();
     if (status != DSM_OK) {
-        std::printf("Node %u could not start (status %d)\n", *nodeId, status);
+        dsm::common::logError(kModule, dsm::common::fromSelf(), "node could not start (status %d)", status);
         return 1;
     }
-    std::printf("Node %u running with %llu bytes of shared memory. Press Ctrl+C to stop.\n", *nodeId,
-                static_cast<unsigned long long>(memoryBytes));
-    std::fflush(stdout);
+    dsm::common::logInfo(kModule, dsm::common::fromSelf(),
+                         "running with %llu bytes of shared memory, press Ctrl+C to stop",
+                         static_cast<unsigned long long>(memoryBytes));
     waitForTerminationSignal();
     node.shutdown();
     return 0;
