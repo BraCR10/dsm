@@ -1,10 +1,13 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "dsm/dsm.h"
+#include "memory/address_map.h"
+#include "settings/cluster_config.h"
 
 namespace {
 
@@ -17,6 +20,8 @@ struct Options {
     std::string command;
     long commandArgument = -1;
     bool allNodes = false;
+    uintptr_t address = 0;
+    bool hasAddress = false;
 };
 
 void printUsage() {
@@ -25,13 +30,20 @@ void printUsage() {
         "Commands:\n"
         "  status                 Show the node table of the cluster\n"
         "  stats [<node-id>|all]  Show the statistics of the local node, another node or every node\n"
-        "  pages <node-id>|all    Show the page table of a node or of every node\n");
+        "  pages <node-id>|all    Show the page table of a node or of every node\n"
+        "  read <address>         Show the 8-byte value stored at a shared address\n");
 }
 
 bool parseNumber(const char* text, long& outValue) {
     char* end = nullptr;
     outValue = std::strtol(text, &end, 10);
     return end != text && *end == '\0' && outValue >= 0;
+}
+
+bool parseAddress(const char* text, uintptr_t& outAddress) {
+    char* end = nullptr;
+    outAddress = static_cast<uintptr_t>(std::strtoull(text, &end, 0));
+    return end != text && *end == '\0' && text[0] != '-';
 }
 
 bool parseOptions(int argumentCount, char** arguments, Options& options) {
@@ -44,6 +56,11 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
             options.nodeId = static_cast<int>(value);
         } else if (options.command.empty()) {
             options.command = argument;
+        } else if (options.command == "read") {
+            if (options.hasAddress || !parseAddress(arguments[index], options.address)) {
+                return false;
+            }
+            options.hasAddress = true;
         } else if (options.commandArgument < 0 && !options.allNodes && argument == "all") {
             options.allNodes = true;
         } else if (options.commandArgument < 0 && !options.allNodes && parseNumber(arguments[index], value)) {
@@ -55,6 +72,9 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
     const bool hasArgument = options.allNodes || options.commandArgument >= 0;
     if (options.command == "pages") {
         return hasArgument;
+    }
+    if (options.command == "read") {
+        return options.hasAddress;
     }
     return options.command == "status" || options.command == "stats";
 }
@@ -158,6 +178,10 @@ int showAllStats() {
     return result;
 }
 
+std::string homeOnlyValue(bool isHomeRow, uint32_t value) {
+    return isHomeRow ? std::to_string(value) : "-";
+}
+
 int showPages(int nodeId) {
     std::vector<PageTableEntry> entries(kMaxPages);
     const int count = dsm_get_page_table(nodeId, entries.data(), entries.size());
@@ -170,10 +194,66 @@ int showPages(int nodeId) {
                 "ORDER", "COPIES");
     for (int index = 0; index < count && static_cast<size_t>(index) < entries.size(); ++index) {
         const PageTableEntry& entry = entries[index];
-        std::printf("%-10" PRIu64 " %-6u %-6u %-8u %-6s %-8u %-6u %-6u\n", entry.global_page_id, entry.home_node,
-                    entry.storage_node, entry.current_holder, stateName(entry.state), entry.process_id,
-                    entry.page_order, entry.copy_count);
+        const bool isHomeRow = entry.home_node == static_cast<uint32_t>(nodeId);
+        std::printf("%-10" PRIu64 " %-6u %-6u %-8u %-6s %-8s %-6s %-6s\n", entry.global_page_id, entry.home_node,
+                    entry.storage_node, entry.current_holder, stateName(entry.state),
+                    homeOnlyValue(isHomeRow, entry.process_id).c_str(),
+                    homeOnlyValue(isHomeRow, entry.page_order).c_str(),
+                    homeOnlyValue(isHomeRow, entry.copy_count).c_str());
     }
+    return 0;
+}
+
+enum class PageLookup { Allocated, NotAllocated, HomeUnavailable };
+
+PageLookup lookUpPage(int homeNodeId, uint64_t pageId) {
+    std::vector<PageTableEntry> entries(kMaxPages);
+    const int count = dsm_get_page_table(homeNodeId, entries.data(), entries.size());
+    if (count < 0) {
+        return PageLookup::HomeUnavailable;
+    }
+    for (int index = 0; index < count && static_cast<size_t>(index) < entries.size(); ++index) {
+        if (entries[index].global_page_id == pageId && entries[index].home_node == static_cast<uint32_t>(homeNodeId)) {
+            return PageLookup::Allocated;
+        }
+    }
+    return PageLookup::NotAllocated;
+}
+
+int readAddress(const std::string& configPath, uintptr_t address) {
+    dsm::settings::ClusterConfig config;
+    if (dsm::settings::loadClusterConfig(configPath, config).status != DSM_OK) {
+        std::printf("The configuration %s could not be read\n", configPath.c_str());
+        return 1;
+    }
+    const dsm::memory::AddressMap addressMap(config);
+    const std::optional<uint32_t> homeNode = addressMap.homeNodeOf(address);
+    const uint64_t offsetInPage =
+        addressMap.containsAddress(address) ? (address - addressMap.windowStart()) % addressMap.pageSize() : 0;
+    if (!homeNode) {
+        std::printf("Address 0x%" PRIxPTR " is outside the shared address window\n", address);
+        return 1;
+    }
+    if (offsetInPage + sizeof(int64_t) > addressMap.pageSize()) {
+        std::printf("The 8 bytes at address 0x%" PRIxPTR " cross the end of a page, use an address at least 8 bytes "
+                    "before the page end\n",
+                    address);
+        return 1;
+    }
+    const uint64_t pageId = addressMap.pageIdOf(address);
+    const PageLookup lookup = lookUpPage(static_cast<int>(*homeNode), pageId);
+    if (lookup == PageLookup::HomeUnavailable) {
+        std::printf("Home node %u of address 0x%" PRIxPTR " is not available\n", *homeNode, address);
+        return 1;
+    }
+    if (lookup == PageLookup::NotAllocated) {
+        std::printf("Address 0x%" PRIxPTR " is not allocated (page %" PRIu64 ", home node %u)\n", address, pageId,
+                    *homeNode);
+        return 1;
+    }
+    const int64_t value = *reinterpret_cast<const volatile int64_t*>(address);
+    std::printf("Address 0x%" PRIxPTR " (page %" PRIu64 ", home node %u)\n", address, pageId, *homeNode);
+    std::printf("Value %" PRId64 " (0x%016" PRIx64 ")\n", value, static_cast<uint64_t>(value));
     return 0;
 }
 
@@ -213,8 +293,10 @@ int main(int argumentCount, char** arguments) {
         result = showStatus();
     } else if (options.command == "stats") {
         result = options.allNodes ? showAllStats() : showStats(static_cast<int>(options.commandArgument));
-    } else {
+    } else if (options.command == "pages") {
         result = options.allNodes ? showAllPages() : showPages(static_cast<int>(options.commandArgument));
+    } else {
+        result = readAddress(options.configPath, options.address);
     }
     dsm_finalize();
     return result;
