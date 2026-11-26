@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 
+#include "../common/run_stats.h"
+#include "../common/worker_claim.h"
 #include "dsm/dsm.h"
 #include "life_core.h"
 
@@ -17,11 +19,11 @@ namespace {
 
 constexpr const char* kDefaultConfigPath = "config/cluster.json";
 constexpr uint64_t kDescriptorMagic = 0x4c49464544534d31ULL;
-constexpr uint32_t kDescriptorVersion = 1;
-constexpr uint32_t kMaximumNodes = 8;
+constexpr uint32_t kDescriptorVersion = 2;
+constexpr uint32_t kMaximumWorkers = 8;
 constexpr uint64_t kPageSize = 4096;
 
-struct NodeSlot {
+struct WorkerSlot {
     uint64_t bufA = 0;
     uint64_t bufB = 0;
     uint64_t display = 0;
@@ -41,8 +43,10 @@ struct NodeSlot {
 struct Descriptor {
     uint64_t magic = 0;
     uint32_t version = 0;
-    uint32_t nodeCount = 0;
+    uint32_t workerCount = 0;
     int32_t barrierId = -1;
+    int32_t mutexId = -1;
+    uint32_t joinedWorkers = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     uint64_t stride = 0;
@@ -53,7 +57,7 @@ struct Descriptor {
     uint32_t wrap = 0;
     uint32_t displayWidth = 0;
     uint32_t displayHeight = 0;
-    NodeSlot nodes[kMaximumNodes];
+    WorkerSlot workers[kMaximumWorkers];
 };
 
 static_assert(sizeof(Descriptor) <= kPageSize, "descriptor must fit in one page");
@@ -61,7 +65,7 @@ static_assert(sizeof(Descriptor) <= kPageSize, "descriptor must fit in one page"
 struct Options {
     std::string configPath = kDefaultConfigPath;
     int nodeId = -1;
-    uint32_t nodes = 1;
+    uint32_t workers = 1;
     uint64_t width = 1024;
     uint64_t height = 1024;
     uint64_t generations = 100;
@@ -76,6 +80,7 @@ struct Options {
     bool ascii = false;
     bool clear = false;
     bool wrap = false;
+    bool creatorOptionGiven = false;
     bool help = false;
 };
 
@@ -90,17 +95,18 @@ int defaultThreadCount() {
 void printUsage() {
     std::printf(
         "Usage:\n"
-        "  life --node <id> [--config <path>] [--nodes <n>] [--width <w>] [--height <h>]\n"
+        "  life [--config <path>] [--node <id>] [--workers <n>] [--width <w>] [--height <h>]\n"
         "       [--generations <g>] [--snapshot-every <k>] [--seed <s>] [--density <percent>]\n"
         "       [--threads <t>] [--display-width <w>] [--display-height <h>] [--ppm <prefix>]\n"
         "       [--ascii] [--clear] [--wrap]\n"
-        "  life --node <id> --join <descriptor_address> [--config <path>] [--threads <t>]\n"
-        "       [--ppm <prefix>] [--ascii] [--clear]\n"
+        "  life --join <descriptor_address> [--config <path>] [--node <id>] [--threads <t>]\n"
         "\n"
-        "Node 0 creates the grid and prints the join command for the other nodes.\n"
+        "The process started without --join creates the grid, becomes worker 0 and prints the\n"
+        "join command. Run that command once per remaining worker, on any machine of the cluster.\n"
+        "--node picks the local DSM node only when several run on the same machine.\n"
         "Example:\n"
-        "  life --node 0 --nodes 3 --width 32768 --height 32768 --generations 100 --ascii\n"
-        "  life --node 1 --join 0x100000000001 --threads 4\n");
+        "  life --workers 3 --width 32768 --height 32768 --generations 100 --ascii\n"
+        "  life --join 0x100000000000 --threads 4\n");
 }
 
 bool parseU64(const char* text, uint64_t& outValue) {
@@ -131,6 +137,19 @@ bool parseInt(const char* text, int& outValue) {
     return true;
 }
 
+bool isCreatorOption(const std::string& argument) {
+    static const char* const creatorOptions[] = {
+        "--workers", "--width",          "--height",         "--generations", "--snapshot-every", "--seed",
+        "--density", "--display-width", "--display-height", "--ppm",         "--ascii",          "--clear",
+        "--wrap"};
+    for (const char* option : creatorOptions) {
+        if (argument == option) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool parseOptions(int argumentCount, char** arguments, Options& options) {
     options.threads = defaultThreadCount();
     for (int index = 1; index < argumentCount; ++index) {
@@ -146,6 +165,9 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
             options.help = true;
             return true;
         }
+        if (isCreatorOption(argument)) {
+            options.creatorOptionGiven = true;
+        }
         if (argument == "--config") {
             const char* value = valueFor("--config");
             if (value == nullptr) {
@@ -158,14 +180,14 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
                 std::fprintf(stderr, "invalid --node value\n");
                 return false;
             }
-        } else if (argument == "--nodes") {
+        } else if (argument == "--workers") {
             uint64_t value = 0;
-            const char* text = valueFor("--nodes");
-            if (text == nullptr || !parseU64(text, value) || value == 0 || value > kMaximumNodes) {
-                std::fprintf(stderr, "invalid --nodes value\n");
+            const char* text = valueFor("--workers");
+            if (text == nullptr || !parseU64(text, value) || value == 0 || value > kMaximumWorkers) {
+                std::fprintf(stderr, "invalid --workers value\n");
                 return false;
             }
-            options.nodes = static_cast<uint32_t>(value);
+            options.workers = static_cast<uint32_t>(value);
         } else if (argument == "--width") {
             const char* text = valueFor("--width");
             if (text == nullptr || !parseU64(text, options.width) || options.width == 0 || options.width > UINT32_MAX) {
@@ -253,14 +275,18 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
 
 bool validateOptions(const Options& options) {
     if (options.joinAddress != 0) {
+        if (options.creatorOptionGiven) {
+            std::fprintf(stderr, "grid and output options only apply to the process that creates the run\n");
+            return false;
+        }
         return true;
     }
-    if (options.nodes == 0 || options.nodes > kMaximumNodes) {
-        std::fprintf(stderr, "--nodes must be between 1 and %u\n", kMaximumNodes);
+    if (options.workers == 0 || options.workers > kMaximumWorkers) {
+        std::fprintf(stderr, "--workers must be between 1 and %u\n", kMaximumWorkers);
         return false;
     }
-    if (options.height < options.nodes) {
-        std::fprintf(stderr, "--height must be at least --nodes\n");
+    if (options.height < options.workers) {
+        std::fprintf(stderr, "--height must be at least --workers\n");
         return false;
     }
     if (options.width == 0 || options.height == 0) {
@@ -291,8 +317,8 @@ const uint8_t* readBufferFromAddress(uint64_t address) {
     return reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(address));
 }
 
-bool allocateNode(Descriptor* descriptor, int nodeId) {
-    NodeSlot& slot = descriptor->nodes[nodeId];
+bool allocateWorker(Descriptor* descriptor, int workerIndex) {
+    WorkerSlot& slot = descriptor->workers[workerIndex];
     const uint64_t bufferBytes = (slot.rowCount + 2) * descriptor->stride;
     const uint64_t displayBytes = static_cast<uint64_t>(descriptor->displayWidth) * descriptor->displayHeight;
     uint8_t* first = static_cast<uint8_t*>(dsm_malloc(bufferBytes));
@@ -322,19 +348,19 @@ bool allocateNode(Descriptor* descriptor, int nodeId) {
     return true;
 }
 
-bool exchangeHalos(Descriptor* descriptor, int nodeId, bool neighbourUsesA, uint8_t* localBase) {
-    const NodeSlot& slot = descriptor->nodes[nodeId];
+bool exchangeHalos(Descriptor* descriptor, int workerIndex, bool neighbourUsesA, uint8_t* localBase) {
+    const WorkerSlot& slot = descriptor->workers[workerIndex];
     const uint64_t stride = descriptor->stride;
     const uint64_t width = descriptor->width;
     const uint64_t rows = slot.rowCount;
     if (rows == 0) {
         return true;
     }
-    const uint64_t aboveIndex = nodeId > 0 ? static_cast<uint64_t>(nodeId - 1)
-                                           : static_cast<uint64_t>(descriptor->nodeCount - 1);
-    const bool aboveExists = nodeId > 0 || descriptor->wrap != 0;
+    const uint64_t aboveIndex = workerIndex > 0 ? static_cast<uint64_t>(workerIndex - 1)
+                                           : static_cast<uint64_t>(descriptor->workerCount - 1);
+    const bool aboveExists = workerIndex > 0 || descriptor->wrap != 0;
     if (aboveExists) {
-        const NodeSlot& above = descriptor->nodes[aboveIndex];
+        const WorkerSlot& above = descriptor->workers[aboveIndex];
         if (above.rowCount > 0) {
             const uint8_t* source = readBufferFromAddress(neighbourUsesA ? above.bufA : above.bufB);
             std::memcpy(localBase, source + above.rowCount * stride, width);
@@ -344,13 +370,13 @@ bool exchangeHalos(Descriptor* descriptor, int nodeId, bool neighbourUsesA, uint
     } else {
         std::memset(localBase, 0, width);
     }
-    const uint64_t belowIndex = nodeId + 1 < static_cast<int>(descriptor->nodeCount)
-                                    ? static_cast<uint64_t>(nodeId + 1)
+    const uint64_t belowIndex = workerIndex + 1 < static_cast<int>(descriptor->workerCount)
+                                    ? static_cast<uint64_t>(workerIndex + 1)
                                     : 0;
-    const bool belowExists = nodeId + 1 < static_cast<int>(descriptor->nodeCount) || descriptor->wrap != 0;
+    const bool belowExists = workerIndex + 1 < static_cast<int>(descriptor->workerCount) || descriptor->wrap != 0;
     uint8_t* bottom = localBase + (rows + 1) * stride;
     if (belowExists) {
-        const NodeSlot& below = descriptor->nodes[belowIndex];
+        const WorkerSlot& below = descriptor->workers[belowIndex];
         if (below.rowCount > 0) {
             const uint8_t* source = readBufferFromAddress(neighbourUsesA ? below.bufA : below.bufB);
             std::memcpy(bottom, source + stride, width);
@@ -449,8 +475,8 @@ void writeAscii(const Descriptor& descriptor, const std::vector<uint8_t>& frame,
 
 std::vector<uint8_t> assembleFrame(const Descriptor& descriptor) {
     std::vector<uint8_t> frame(static_cast<size_t>(descriptor.displayWidth) * descriptor.displayHeight, 0);
-    for (uint32_t node = 0; node < descriptor.nodeCount; ++node) {
-        const NodeSlot& slot = descriptor.nodes[node];
+    for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
+        const WorkerSlot& slot = descriptor.workers[worker];
         if (slot.displayRowEnd <= slot.displayRowStart) {
             continue;
         }
@@ -463,16 +489,16 @@ std::vector<uint8_t> assembleFrame(const Descriptor& descriptor) {
     return frame;
 }
 
-bool snapshot(Descriptor* descriptor, int nodeId, const life::Grid& grid, uint64_t generation,
+bool snapshot(Descriptor* descriptor, int workerIndex, const life::Grid& grid, uint64_t generation,
               const Options& options) {
-    NodeSlot& slot = descriptor->nodes[nodeId];
+    WorkerSlot& slot = descriptor->workers[workerIndex];
     uint8_t* display = bufferFromAddress(slot.display);
     life::downsampleOwnRows(grid, display, descriptor->displayWidth, descriptor->displayHeight, slot.displayRowStart,
                             slot.displayRowEnd, slot.rowStart, descriptor->height);
     if (!syncBarrier(descriptor->barrierId)) {
         return false;
     }
-    if (nodeId == 0 && (!options.ppmPrefix.empty() || options.ascii)) {
+    if (workerIndex == 0 && (!options.ppmPrefix.empty() || options.ascii)) {
         const std::vector<uint8_t> frame = assembleFrame(*descriptor);
         if (!options.ppmPrefix.empty()) {
             writePpm(*descriptor, frame, generation, options.ppmPrefix);
@@ -488,18 +514,18 @@ void printSummary(const Descriptor& descriptor) {
     uint64_t totalLive = 0;
     uint64_t totalHash = 0;
     uint64_t maximumElapsed = 0;
-    std::printf("Life finished: %u node(s), %u x %u grid, %llu generation(s)\n",
-                static_cast<unsigned>(descriptor.nodeCount), static_cast<unsigned>(descriptor.width),
+    std::printf("Life finished: %u worker(s), %u x %u grid, %llu generation(s)\n",
+                static_cast<unsigned>(descriptor.workerCount), static_cast<unsigned>(descriptor.width),
                 static_cast<unsigned>(descriptor.height), static_cast<unsigned long long>(descriptor.generations));
-    for (uint32_t node = 0; node < descriptor.nodeCount; ++node) {
-        const NodeSlot& slot = descriptor.nodes[node];
+    for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
+        const WorkerSlot& slot = descriptor.workers[worker];
         totalLive += slot.liveCells;
         totalHash += slot.checksum;
         maximumElapsed = std::max(maximumElapsed, slot.elapsedMicros);
         std::printf(
-            "  node %u rows [%llu, %llu) live %llu checksum %016llx faults %llu sent %llu recv %llu "
+            "  worker %u rows [%llu, %llu) live %llu checksum %016llx faults %llu sent %llu recv %llu "
             "invalidations %llu time %.3f s\n",
-            static_cast<unsigned>(node), static_cast<unsigned long long>(slot.rowStart),
+            static_cast<unsigned>(worker), static_cast<unsigned long long>(slot.rowStart),
             static_cast<unsigned long long>(slot.rowStart + slot.rowCount),
             static_cast<unsigned long long>(slot.liveCells), static_cast<unsigned long long>(slot.checksum),
             static_cast<unsigned long long>(slot.pageFaults), static_cast<unsigned long long>(slot.pagesSent),
@@ -516,8 +542,8 @@ void printSummary(const Descriptor& descriptor) {
     }
 }
 
-int runSimulation(Descriptor* descriptor, int nodeId, const Options& options) {
-    NodeSlot& slot = descriptor->nodes[nodeId];
+int runSimulation(Descriptor* descriptor, int workerIndex, const Options& options) {
+    WorkerSlot& slot = descriptor->workers[workerIndex];
     uint8_t* firstBuffer = bufferFromAddress(slot.bufA);
     uint8_t* secondBuffer = bufferFromAddress(slot.bufB);
     uint8_t* display = bufferFromAddress(slot.display);
@@ -525,6 +551,7 @@ int runSimulation(Descriptor* descriptor, int nodeId, const Options& options) {
     life::Grid secondGrid{secondBuffer, descriptor->stride, descriptor->width, slot.rowCount};
     life::Grid* source = &firstGrid;
     life::Grid* destination = &secondGrid;
+    const DsmStats statsBefore = apps::readNodeStats();
     const auto start = std::chrono::steady_clock::now();
     bool ok = true;
     bool finalSnapshotTaken = false;
@@ -534,11 +561,11 @@ int runSimulation(Descriptor* descriptor, int nodeId, const Options& options) {
             ok = false;
             break;
         }
-        exchangeHalos(descriptor, nodeId, generation % 2 == 1, destination->data);
+        exchangeHalos(descriptor, workerIndex, generation % 2 == 1, destination->data);
         std::swap(source, destination);
         const uint64_t completed = generation + 1;
         if (descriptor->snapshotEvery > 0 && completed % descriptor->snapshotEvery == 0) {
-            if (!snapshot(descriptor, nodeId, *source, completed, options)) {
+            if (!snapshot(descriptor, workerIndex, *source, completed, options)) {
                 ok = false;
                 break;
             }
@@ -548,30 +575,27 @@ int runSimulation(Descriptor* descriptor, int nodeId, const Options& options) {
         }
     }
     if (ok && !finalSnapshotTaken) {
-        if (!snapshot(descriptor, nodeId, *source, descriptor->generations, options)) {
+        if (!snapshot(descriptor, workerIndex, *source, descriptor->generations, options)) {
             ok = false;
         }
     }
     uint64_t liveCells = 0;
     uint64_t checksum = 0;
     life::checksumOwnRows(*source, slot.rowStart, liveCells, checksum);
-    DsmStats stats{};
-    if (dsm_get_stats(&stats) != DSM_OK) {
-        std::memset(&stats, 0, sizeof(stats));
-    }
+    const apps::RunStats stats = apps::statsSince(statsBefore);
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
     slot.liveCells = liveCells;
     slot.checksum = checksum;
     slot.elapsedMicros = static_cast<uint64_t>(elapsed.count());
-    slot.pageFaults = stats.page_faults;
-    slot.pagesSent = stats.pages_sent;
-    slot.pagesReceived = stats.pages_received;
+    slot.pageFaults = stats.pageFaults;
+    slot.pagesSent = stats.pagesSent;
+    slot.pagesReceived = stats.pagesReceived;
     slot.invalidations = stats.invalidations;
     if (ok && !syncBarrier(descriptor->barrierId)) {
         ok = false;
     }
-    if (ok && nodeId == 0) {
+    if (ok && workerIndex == 0) {
         printSummary(*descriptor);
     }
     if (ok && !syncBarrier(descriptor->barrierId)) {
@@ -592,7 +616,7 @@ int runCreator(const Options& options) {
     *descriptor = Descriptor{};
     descriptor->magic = kDescriptorMagic;
     descriptor->version = kDescriptorVersion;
-    descriptor->nodeCount = options.nodes;
+    descriptor->workerCount = options.workers;
     descriptor->width = static_cast<uint32_t>(options.width);
     descriptor->height = static_cast<uint32_t>(options.height);
     descriptor->stride = life::roundUp(options.width, kPageSize);
@@ -609,18 +633,25 @@ int runCreator(const Options& options) {
     if (descriptor->displayHeight > descriptor->height) {
         descriptor->displayHeight = descriptor->height;
     }
-    descriptor->barrierId = dsm_barrier_init(static_cast<int>(descriptor->nodeCount));
+    descriptor->barrierId = dsm_barrier_init(static_cast<int>(descriptor->workerCount));
     if (descriptor->barrierId < 0) {
         std::fprintf(stderr, "dsm_barrier_init failed with status %d\n", descriptor->barrierId);
         dsm_free(descriptor);
         return 1;
     }
-    const uint64_t baseRows = options.height / options.nodes;
-    const uint64_t remainder = options.height % options.nodes;
+    descriptor->mutexId = dsm_mutex_init();
+    if (descriptor->mutexId < 0) {
+        std::fprintf(stderr, "dsm_mutex_init failed with status %d\n", descriptor->mutexId);
+        dsm_free(descriptor);
+        return 1;
+    }
+    descriptor->joinedWorkers = 1;
+    const uint64_t baseRows = options.height / options.workers;
+    const uint64_t remainder = options.height % options.workers;
     uint64_t rowStart = 0;
-    for (uint32_t node = 0; node < descriptor->nodeCount; ++node) {
-        const uint64_t rows = baseRows + (node < remainder ? 1 : 0);
-        NodeSlot& slot = descriptor->nodes[node];
+    for (uint32_t worker = 0; worker < descriptor->workerCount; ++worker) {
+        const uint64_t rows = baseRows + (worker < remainder ? 1 : 0);
+        WorkerSlot& slot = descriptor->workers[worker];
         slot.rowStart = rowStart;
         slot.rowCount = rows;
         slot.displayRowStart = descriptor->displayHeight;
@@ -637,24 +668,23 @@ int runCreator(const Options& options) {
         }
         rowStart += rows;
     }
-    std::printf("Life grid %u x %u, %u node(s), %llu generation(s), seed %llu, wrap %s\n",
+    std::printf("Life grid %u x %u, %u worker(s), %llu generation(s), seed %llu, wrap %s\n",
                 static_cast<unsigned>(descriptor->width), static_cast<unsigned>(descriptor->height),
-                static_cast<unsigned>(descriptor->nodeCount),
+                static_cast<unsigned>(descriptor->workerCount),
                 static_cast<unsigned long long>(descriptor->generations),
                 static_cast<unsigned long long>(descriptor->seed), descriptor->wrap != 0 ? "yes" : "no");
-    if (descriptor->nodeCount > 1) {
-        std::printf("Run on the other nodes:\n");
-        for (uint32_t node = 1; node < descriptor->nodeCount; ++node) {
-            std::printf("  life --node %u --join 0x%llx --threads %d", static_cast<unsigned>(node),
-                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(descriptor)), options.threads);
-            if (options.configPath != kDefaultConfigPath) {
-                std::printf(" --config %s", options.configPath.c_str());
-            }
-            std::printf("\n");
+    if (descriptor->workerCount > 1) {
+        std::printf("Run this command %u more time(s), on any machine of the cluster:\n",
+                    static_cast<unsigned>(descriptor->workerCount - 1));
+        std::printf("  life --join 0x%llx --threads %d",
+                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(descriptor)), options.threads);
+        if (options.configPath != kDefaultConfigPath) {
+            std::printf(" --config %s", options.configPath.c_str());
         }
+        std::printf("\n");
     }
     std::fflush(stdout);
-    if (!allocateNode(descriptor, 0)) {
+    if (!allocateWorker(descriptor, 0)) {
         dsm_free(descriptor);
         return 1;
     }
@@ -662,8 +692,9 @@ int runCreator(const Options& options) {
         dsm_free(descriptor);
         return 1;
     }
+    dsm_mutex_destroy(descriptor->mutexId);
     {
-        NodeSlot& slot = descriptor->nodes[0];
+        WorkerSlot& slot = descriptor->workers[0];
         if (!exchangeHalos(descriptor, 0, true, bufferFromAddress(slot.bufA))) {
             dsm_free(descriptor);
             return 1;
@@ -685,34 +716,39 @@ int runJoiner(const Options& options) {
                      static_cast<unsigned long long>(options.joinAddress));
         return 1;
     }
-    if (descriptor->nodeCount == 0 || descriptor->nodeCount > kMaximumNodes) {
-        std::fprintf(stderr, "descriptor has an invalid node count\n");
+    if (descriptor->workerCount == 0 || descriptor->workerCount > kMaximumWorkers) {
+        std::fprintf(stderr, "descriptor has an invalid worker count\n");
         return 1;
     }
-    if (static_cast<uint32_t>(options.nodeId) >= descriptor->nodeCount) {
-        std::fprintf(stderr, "node %d is not part of this run\n", options.nodeId);
+    if (descriptor->barrierId < 0 || descriptor->mutexId < 0) {
+        std::fprintf(stderr, "descriptor has an invalid barrier or mutex\n");
         return 1;
     }
-    if (descriptor->barrierId < 0) {
-        std::fprintf(stderr, "descriptor has an invalid barrier\n");
+    uint32_t workerIndex = 0;
+    if (!apps::claimWorkerIndex(descriptor->mutexId, descriptor->joinedWorkers, descriptor->workerCount,
+                                workerIndex)) {
         return 1;
     }
-    if (!allocateNode(descriptor, options.nodeId)) {
+    std::printf("Joined as worker %u of %u\n", static_cast<unsigned>(workerIndex),
+                static_cast<unsigned>(descriptor->workerCount));
+    std::fflush(stdout);
+    const int worker = static_cast<int>(workerIndex);
+    if (!allocateWorker(descriptor, worker)) {
         return 1;
     }
     if (!syncBarrier(descriptor->barrierId)) {
         return 1;
     }
     {
-        NodeSlot& slot = descriptor->nodes[options.nodeId];
-        if (!exchangeHalos(descriptor, options.nodeId, true, bufferFromAddress(slot.bufA))) {
+        WorkerSlot& slot = descriptor->workers[worker];
+        if (!exchangeHalos(descriptor, worker, true, bufferFromAddress(slot.bufA))) {
             return 1;
         }
         if (!syncBarrier(descriptor->barrierId)) {
             return 1;
         }
     }
-    return runSimulation(descriptor, options.nodeId, options);
+    return runSimulation(descriptor, worker, options);
 }
 
 }
@@ -726,18 +762,6 @@ int main(int argumentCount, char** arguments) {
     if (options.help) {
         printUsage();
         return 0;
-    }
-    if (options.nodeId < 0) {
-        std::fprintf(stderr, "--node is required\n");
-        return 2;
-    }
-    if (options.joinAddress == 0 && options.nodeId != 0) {
-        std::fprintf(stderr, "start node 0 without --join, or pass --join to this node\n");
-        return 2;
-    }
-    if (options.joinAddress != 0 && options.nodeId == 0) {
-        std::fprintf(stderr, "the creator must be node 0 without --join\n");
-        return 2;
     }
     if (!validateOptions(options)) {
         return 2;

@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "../common/run_stats.h"
+#include "../common/worker_claim.h"
 #include "compress_core.h"
 #include "dsm/dsm.h"
 
@@ -16,8 +18,8 @@ namespace {
 
 constexpr const char* kDefaultConfigPath = "config/cluster.json";
 constexpr uint64_t kDescriptorMagic = 0x44534d434f4d5031ULL;
-constexpr uint32_t kDescriptorVersion = 1;
-constexpr uint32_t kMaximumNodes = 16;
+constexpr uint32_t kDescriptorVersion = 2;
+constexpr uint32_t kMaximumWorkers = 16;
 constexpr uint64_t kDefaultBlockSize = 65536;
 constexpr uint64_t kFileVersion = 1;
 constexpr char kFileMagic[8] = {'D', 'S', 'M', 'C', 'M', 'P', '0', '1'};
@@ -46,7 +48,7 @@ struct BlockRecord {
 static_assert(sizeof(FileHeader) == 56, "unexpected file header size");
 static_assert(sizeof(BlockRecord) == 32, "unexpected block record size");
 
-struct NodeSlot {
+struct WorkerSlot {
     uint64_t blockStart;
     uint64_t blockEnd;
     uint64_t input;
@@ -68,15 +70,17 @@ struct Descriptor {
     uint64_t magic;
     uint32_t version;
     uint32_t mode;
-    uint32_t nodeCount;
+    uint32_t workerCount;
     int32_t barrierId;
+    int32_t mutexId;
+    uint32_t joinedWorkers;
     uint64_t blockSize;
     uint64_t rawSize;
     uint64_t blockCount;
     uint64_t rawChecksum;
     uint32_t codec;
     uint32_t abort;
-    NodeSlot nodes[kMaximumNodes];
+    WorkerSlot workers[kMaximumWorkers];
 };
 
 static_assert(sizeof(Descriptor) <= 4096, "descriptor must fit in one page");
@@ -89,12 +93,13 @@ struct ParsedBlock {
 struct Options {
     std::string configPath = kDefaultConfigPath;
     int nodeId = -1;
-    uint32_t nodes = 1;
+    uint32_t workers = 1;
     uint64_t blockSize = kDefaultBlockSize;
     uint64_t joinAddress = 0;
     uint32_t mode = 0;
     std::string inputPath;
     std::string outputPath;
+    bool creatorOptionGiven = false;
     bool help = false;
 };
 
@@ -103,18 +108,20 @@ using Clock = std::chrono::steady_clock;
 void printUsage() {
     std::printf(
         "Usage:\n"
-        "  compress --node <id> [--config <path>] [--nodes <n>] [--block-size <bytes>] "
+        "  compress [--config <path>] [--node <id>] [--workers <n>] [--block-size <bytes>] "
         "compress <input> <output>\n"
-        "  compress --node <id> [--config <path>] [--nodes <n>] [--block-size <bytes>] "
+        "  compress [--config <path>] [--node <id>] [--workers <n>] [--block-size <bytes>] "
         "decompress <input> <output>\n"
-        "  compress --node <id> [--config <path>] --join <descriptor_address>\n"
+        "  compress --join <descriptor_address> [--config <path>] [--node <id>]\n"
         "\n"
-        "Node 0 creates the shared descriptor and prints the join command for the other nodes.\n"
+        "The process started without --join reads the input, becomes worker 0 and prints the join\n"
+        "command. Run that command once per remaining worker, on any machine of the cluster.\n"
+        "--node picks the local DSM node only when several run on the same machine.\n"
         "The compressed format is a header followed by independently compressed LZSS blocks.\n"
         "Example:\n"
-        "  compress --node 0 --nodes 3 compress input.bin output.dsmc\n"
-        "  compress --node 1 --join 0x100000000000\n"
-        "  compress --node 0 --nodes 3 decompress output.dsmc restored.bin\n");
+        "  compress --workers 3 compress input.bin output.dsmc\n"
+        "  compress --join 0x100000000000\n"
+        "  compress --workers 3 decompress output.dsmc restored.bin\n");
 }
 
 bool parseU64(const char* text, uint64_t& outValue) {
@@ -172,20 +179,22 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
                 std::fprintf(stderr, "invalid --node value\n");
                 return false;
             }
-        } else if (argument == "--nodes") {
+        } else if (argument == "--workers") {
             uint64_t value = 0;
-            const char* text = valueFor("--nodes");
-            if (text == nullptr || !parseU64(text, value) || value == 0 || value > kMaximumNodes) {
-                std::fprintf(stderr, "invalid --nodes value\n");
+            const char* text = valueFor("--workers");
+            if (text == nullptr || !parseU64(text, value) || value == 0 || value > kMaximumWorkers) {
+                std::fprintf(stderr, "invalid --workers value\n");
                 return false;
             }
-            options.nodes = static_cast<uint32_t>(value);
+            options.workers = static_cast<uint32_t>(value);
+            options.creatorOptionGiven = true;
         } else if (argument == "--block-size") {
             const char* text = valueFor("--block-size");
             if (text == nullptr || !parseU64(text, options.blockSize) || options.blockSize == 0) {
                 std::fprintf(stderr, "invalid --block-size value\n");
                 return false;
             }
+            options.creatorOptionGiven = true;
         } else if (argument == "--join") {
             const char* text = valueFor("--join");
             if (text == nullptr || !parseU64(text, options.joinAddress) || options.joinAddress == 0) {
@@ -203,17 +212,13 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
     if (options.help) {
         return true;
     }
-    if (options.nodeId < 0) {
-        std::fprintf(stderr, "--node is required\n");
-        return false;
-    }
     if (options.joinAddress != 0) {
         if (!positional.empty()) {
             std::fprintf(stderr, "--join does not take a command or file names\n");
             return false;
         }
-        if (options.nodeId == 0) {
-            std::fprintf(stderr, "the creator is node 0 without --join\n");
+        if (options.creatorOptionGiven) {
+            std::fprintf(stderr, "--workers and --block-size only apply to the process that creates the run\n");
             return false;
         }
         return true;
@@ -229,10 +234,6 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
         options.mode = kModeDecompress;
     } else {
         std::fprintf(stderr, "unknown command %s\n", positional[0].c_str());
-        return false;
-    }
-    if (options.nodeId != 0) {
-        std::fprintf(stderr, "the creator must be node 0; use --join on the other nodes\n");
         return false;
     }
     options.inputPath = positional[1];
@@ -383,20 +384,20 @@ bool parseCompressedFile(const std::vector<uint8_t>& file, FileHeader& outHeader
 }
 
 void assignBlocks(Descriptor* descriptor) {
-    const uint64_t base = descriptor->blockCount / descriptor->nodeCount;
-    const uint64_t remainder = descriptor->blockCount % descriptor->nodeCount;
+    const uint64_t base = descriptor->blockCount / descriptor->workerCount;
+    const uint64_t remainder = descriptor->blockCount % descriptor->workerCount;
     uint64_t nextBlock = 0;
-    for (uint32_t node = 0; node < descriptor->nodeCount; ++node) {
-        const uint64_t count = base + (node < remainder ? 1 : 0);
-        descriptor->nodes[node].blockStart = nextBlock;
-        descriptor->nodes[node].blockEnd = nextBlock + count;
+    for (uint32_t worker = 0; worker < descriptor->workerCount; ++worker) {
+        const uint64_t count = base + (worker < remainder ? 1 : 0);
+        descriptor->workers[worker].blockStart = nextBlock;
+        descriptor->workers[worker].blockEnd = nextBlock + count;
         nextBlock += count;
     }
 }
 
 void prepareSlots(Descriptor* descriptor, const std::vector<ParsedBlock>& parsed) {
-    for (uint32_t node = 0; node < descriptor->nodeCount; ++node) {
-        NodeSlot& slot = descriptor->nodes[node];
+    for (uint32_t worker = 0; worker < descriptor->workerCount; ++worker) {
+        WorkerSlot& slot = descriptor->workers[worker];
         uint64_t rawBytes = 0;
         uint64_t inputBytes = 0;
         uint64_t outputCapacity = 0;
@@ -438,8 +439,10 @@ Descriptor* createDescriptor(const FileHeader& header, const Options& options,
     descriptor->magic = kDescriptorMagic;
     descriptor->version = kDescriptorVersion;
     descriptor->mode = options.mode;
-    descriptor->nodeCount = options.nodes;
+    descriptor->workerCount = options.workers;
     descriptor->barrierId = -1;
+    descriptor->mutexId = -1;
+    descriptor->joinedWorkers = 1;
     descriptor->blockSize = header.blockSize;
     descriptor->rawSize = header.rawSize;
     descriptor->blockCount = header.blockCount;
@@ -447,9 +450,15 @@ Descriptor* createDescriptor(const FileHeader& header, const Options& options,
     descriptor->codec = header.codec;
     assignBlocks(descriptor);
     prepareSlots(descriptor, parsed);
-    descriptor->barrierId = dsm_barrier_init(static_cast<int>(descriptor->nodeCount));
+    descriptor->barrierId = dsm_barrier_init(static_cast<int>(descriptor->workerCount));
     if (descriptor->barrierId < 0) {
         std::fprintf(stderr, "dsm_barrier_init failed with status %d\n", descriptor->barrierId);
+        dsm_free(descriptor);
+        return nullptr;
+    }
+    descriptor->mutexId = dsm_mutex_init();
+    if (descriptor->mutexId < 0) {
+        std::fprintf(stderr, "dsm_mutex_init failed with status %d\n", descriptor->mutexId);
         dsm_free(descriptor);
         return nullptr;
     }
@@ -458,31 +467,30 @@ Descriptor* createDescriptor(const FileHeader& header, const Options& options,
 
 void printStart(const Descriptor& descriptor, const Options& options) {
     if (descriptor.mode == kModeCompress) {
-        std::printf("Compress %llu bytes with %llu-byte blocks on %u node(s)\n",
+        std::printf("Compress %llu bytes with %llu-byte blocks on %u worker(s)\n",
                     static_cast<unsigned long long>(descriptor.rawSize),
                     static_cast<unsigned long long>(descriptor.blockSize),
-                    static_cast<unsigned>(descriptor.nodeCount));
+                    static_cast<unsigned>(descriptor.workerCount));
     } else {
-        std::printf("Decompress %llu bytes from %llu block(s) on %u node(s)\n",
+        std::printf("Decompress %llu bytes from %llu block(s) on %u worker(s)\n",
                     static_cast<unsigned long long>(descriptor.rawSize),
                     static_cast<unsigned long long>(descriptor.blockCount),
-                    static_cast<unsigned>(descriptor.nodeCount));
+                    static_cast<unsigned>(descriptor.workerCount));
     }
-    if (descriptor.nodeCount > 1) {
-        std::printf("Run on the other nodes:\n");
-        for (uint32_t node = 1; node < descriptor.nodeCount; ++node) {
-            std::printf("  compress --node %u --join 0x%llx", static_cast<unsigned>(node),
-                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(&descriptor)));
-            if (options.configPath != kDefaultConfigPath) {
-                std::printf(" --config %s", options.configPath.c_str());
-            }
-            std::printf("\n");
+    if (descriptor.workerCount > 1) {
+        std::printf("Run this command %u more time(s), on any machine of the cluster:\n",
+                    static_cast<unsigned>(descriptor.workerCount - 1));
+        std::printf("  compress --join 0x%llx",
+                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(&descriptor)));
+        if (options.configPath != kDefaultConfigPath) {
+            std::printf(" --config %s", options.configPath.c_str());
         }
+        std::printf("\n");
     }
     std::fflush(stdout);
 }
 
-bool allocateSlot(NodeSlot& slot) {
+bool allocateSlot(WorkerSlot& slot) {
     if (slot.inputBytes > 0) {
         void* input = dsm_malloc(static_cast<size_t>(slot.inputBytes));
         if (input == nullptr) {
@@ -515,13 +523,13 @@ void freeAddresses(uint64_t input, uint64_t output) {
 
 bool distributeInput(Descriptor* descriptor, const std::vector<uint8_t>& file,
                      const std::vector<ParsedBlock>& parsed) {
-    for (uint32_t node = 0; node < descriptor->nodeCount; ++node) {
-        const NodeSlot& slot = descriptor->nodes[node];
+    for (uint32_t worker = 0; worker < descriptor->workerCount; ++worker) {
+        const WorkerSlot& slot = descriptor->workers[worker];
         uint8_t* destination = bufferFromAddress(slot.input);
         if (descriptor->mode == kModeCompress) {
             const uint64_t offset = slot.blockStart * descriptor->blockSize;
             if (offset + slot.inputBytes > file.size()) {
-                std::fprintf(stderr, "input range for node %u is out of bounds\n", node);
+                std::fprintf(stderr, "input range for worker %u is out of bounds\n", worker);
                 return false;
             }
             if (slot.inputBytes > 0) {
@@ -535,7 +543,7 @@ bool distributeInput(Descriptor* descriptor, const std::vector<uint8_t>& file,
             const ParsedBlock& parsedBlock = parsed[static_cast<size_t>(block)];
             const uint64_t recordSize = sizeof(BlockRecord) + parsedBlock.record.compressedSize;
             if (cursor + recordSize > slot.inputBytes) {
-                std::fprintf(stderr, "input range for node %u is out of bounds\n", node);
+                std::fprintf(stderr, "input range for worker %u is out of bounds\n", worker);
                 return false;
             }
             std::memcpy(destination + cursor, &parsedBlock.record, sizeof(BlockRecord));
@@ -547,14 +555,14 @@ bool distributeInput(Descriptor* descriptor, const std::vector<uint8_t>& file,
             }
         }
         if (cursor != slot.inputBytes) {
-            std::fprintf(stderr, "input range for node %u is inconsistent\n", node);
+            std::fprintf(stderr, "input range for worker %u is inconsistent\n", worker);
             return false;
         }
     }
     return true;
 }
 
-int compressSlot(const Descriptor& descriptor, NodeSlot& slot) {
+int compressSlot(const Descriptor& descriptor, WorkerSlot& slot) {
     const uint8_t* input = readBufferFromAddress(slot.input);
     uint8_t* output = bufferFromAddress(slot.output);
     uint64_t inputOffset = 0;
@@ -587,7 +595,7 @@ int compressSlot(const Descriptor& descriptor, NodeSlot& slot) {
     return DSM_OK;
 }
 
-int decompressSlot(const Descriptor& descriptor, NodeSlot& slot) {
+int decompressSlot(const Descriptor& descriptor, WorkerSlot& slot) {
     const uint8_t* input = readBufferFromAddress(slot.input);
     uint8_t* output = bufferFromAddress(slot.output);
     uint64_t inputOffset = 0;
@@ -629,16 +637,13 @@ int decompressSlot(const Descriptor& descriptor, NodeSlot& slot) {
     return DSM_OK;
 }
 
-void recordStats(NodeSlot& slot, Clock::time_point start) {
-    DsmStats stats{};
-    if (dsm_get_stats(&stats) != DSM_OK) {
-        std::memset(&stats, 0, sizeof(stats));
-    }
+void recordStats(WorkerSlot& slot, Clock::time_point start, const DsmStats& statsBefore) {
+    const apps::RunStats stats = apps::statsSince(statsBefore);
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start);
     slot.elapsedMicros = static_cast<uint64_t>(elapsed.count());
-    slot.pageFaults = stats.page_faults;
-    slot.pagesSent = stats.pages_sent;
-    slot.pagesReceived = stats.pages_received;
+    slot.pageFaults = stats.pageFaults;
+    slot.pagesSent = stats.pagesSent;
+    slot.pagesReceived = stats.pagesReceived;
     slot.invalidations = stats.invalidations;
 }
 
@@ -662,13 +667,13 @@ bool writeCompressedOutput(const Descriptor& descriptor, const std::string& path
     }
 
     std::vector<uint8_t> staging;
-    for (uint32_t node = 0; node < descriptor.nodeCount; ++node) {
-        const NodeSlot& slot = descriptor.nodes[node];
+    for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
+        const WorkerSlot& slot = descriptor.workers[worker];
         const uint8_t* buffer = readBufferFromAddress(slot.output);
         uint64_t cursor = 0;
         for (uint64_t block = slot.blockStart; block < slot.blockEnd; ++block) {
             if (cursor + sizeof(BlockRecord) > slot.outputBytes) {
-                std::fprintf(stderr, "node %u produced an inconsistent output\n", node);
+                std::fprintf(stderr, "worker %u produced an inconsistent output\n", worker);
                 return false;
             }
             BlockRecord record{};
@@ -677,7 +682,7 @@ bool writeCompressedOutput(const Descriptor& descriptor, const std::string& path
                 record.rawSize != rawSizeOfBlock(descriptor.rawSize, descriptor.blockSize, block) ||
                 record.compressedSize > compressor::worstCaseSize(record.rawSize) ||
                 cursor + sizeof(BlockRecord) + record.compressedSize > slot.outputBytes) {
-                std::fprintf(stderr, "node %u produced an invalid block %llu\n", node,
+                std::fprintf(stderr, "worker %u produced an invalid block %llu\n", worker,
                              static_cast<unsigned long long>(block));
                 return false;
             }
@@ -697,7 +702,7 @@ bool writeCompressedOutput(const Descriptor& descriptor, const std::string& path
             cursor += record.compressedSize;
         }
         if (cursor != slot.outputBytes) {
-            std::fprintf(stderr, "node %u produced trailing output\n", node);
+            std::fprintf(stderr, "worker %u produced trailing output\n", worker);
             return false;
         }
     }
@@ -714,10 +719,10 @@ bool writeDecompressedOutput(const Descriptor& descriptor, const std::string& pa
     std::vector<uint8_t> staging;
     uint64_t written = 0;
     uint64_t checksum = compressor::checksum(nullptr, 0);
-    for (uint32_t node = 0; node < descriptor.nodeCount; ++node) {
-        const NodeSlot& slot = descriptor.nodes[node];
+    for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
+        const WorkerSlot& slot = descriptor.workers[worker];
         if (slot.outputBytes != slot.rawBytes) {
-            std::fprintf(stderr, "node %u produced an inconsistent output\n", node);
+            std::fprintf(stderr, "worker %u produced an inconsistent output\n", worker);
             return false;
         }
         const uint8_t* buffer = readBufferFromAddress(slot.output);
@@ -759,10 +764,10 @@ void printSummary(const Descriptor& descriptor) {
     } else {
         std::printf("Decompression finished: %llu bytes, ", static_cast<unsigned long long>(descriptor.rawSize));
     }
-    for (uint32_t node = 0; node < descriptor.nodeCount; ++node) {
-        totalBlocks += descriptor.nodes[node].blockEnd - descriptor.nodes[node].blockStart;
-        totalOutput += descriptor.nodes[node].outputBytes;
-        maximumElapsed = std::max(maximumElapsed, descriptor.nodes[node].elapsedMicros);
+    for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
+        totalBlocks += descriptor.workers[worker].blockEnd - descriptor.workers[worker].blockStart;
+        totalOutput += descriptor.workers[worker].outputBytes;
+        maximumElapsed = std::max(maximumElapsed, descriptor.workers[worker].elapsedMicros);
     }
     if (descriptor.mode == kModeCompress) {
         std::printf("%llu bytes in %llu block(s)\n", static_cast<unsigned long long>(totalOutput),
@@ -770,12 +775,12 @@ void printSummary(const Descriptor& descriptor) {
     } else {
         std::printf("%llu block(s)\n", static_cast<unsigned long long>(totalBlocks));
     }
-    for (uint32_t node = 0; node < descriptor.nodeCount; ++node) {
-        const NodeSlot& slot = descriptor.nodes[node];
+    for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
+        const WorkerSlot& slot = descriptor.workers[worker];
         std::printf(
-            "  node %u blocks [%llu, %llu) raw %llu bytes, out %llu bytes, %.3f s, "
+            "  worker %u blocks [%llu, %llu) raw %llu bytes, out %llu bytes, %.3f s, "
             "faults %llu sent %llu recv %llu invalidations %llu\n",
-            static_cast<unsigned>(node), static_cast<unsigned long long>(slot.blockStart),
+            static_cast<unsigned>(worker), static_cast<unsigned long long>(slot.blockStart),
             static_cast<unsigned long long>(slot.blockEnd),
             static_cast<unsigned long long>(slot.rawBytes),
             static_cast<unsigned long long>(slot.outputBytes),
@@ -787,23 +792,34 @@ void printSummary(const Descriptor& descriptor) {
     }
     if (descriptor.mode == kModeCompress && descriptor.rawSize > 0) {
         const double ratio = static_cast<double>(totalOutput) * 100.0 / static_cast<double>(descriptor.rawSize);
-        std::printf("  ratio %.2f%%, slowest node %.3f s\n", ratio,
+        std::printf("  ratio %.2f%%, slowest worker %.3f s\n", ratio,
                     static_cast<double>(maximumElapsed) / 1000000.0);
     }
     std::fflush(stdout);
 }
 
+const char* describeWorkerError(int32_t status) {
+    switch (status) {
+        case DSM_ERR_NO_MEMORY: return "not enough DSM memory for its buffers";
+        case DSM_ERR_INVALID_MESSAGE: return "a compressed block is corrupt";
+        case DSM_ERR_SIZE_MISMATCH: return "its blocks do not match the sizes in the file header";
+        case DSM_ERR_INTERNAL: return "a block grew beyond its worst-case compressed size";
+        default: return "unexpected error";
+    }
+}
+
 void printErrors(const Descriptor& descriptor) {
-    for (uint32_t node = 0; node < descriptor.nodeCount; ++node) {
-        if (descriptor.nodes[node].error != 0) {
-            std::fprintf(stderr, "node %u failed with status %d\n", node, descriptor.nodes[node].error);
+    for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
+        const int32_t error = descriptor.workers[worker].error;
+        if (error != 0) {
+            std::fprintf(stderr, "worker %u failed: %s (status %d)\n", worker, describeWorkerError(error), error);
         }
     }
 }
 
-int runSession(Descriptor* descriptor, int nodeId, bool creator, const std::vector<uint8_t>* file,
+int runSession(Descriptor* descriptor, int workerIndex, bool creator, const std::vector<uint8_t>* file,
                const std::vector<ParsedBlock>* parsed, const std::string& outputPath) {
-    NodeSlot& slot = descriptor->nodes[nodeId];
+    WorkerSlot& slot = descriptor->workers[workerIndex];
     if (!allocateSlot(slot)) {
         slot.error = DSM_ERR_NO_MEMORY;
     }
@@ -818,9 +834,10 @@ int runSession(Descriptor* descriptor, int nodeId, bool creator, const std::vect
     }
 
     if (creator) {
+        dsm_mutex_destroy(descriptor->mutexId);
         bool anyError = false;
-        for (uint32_t node = 0; node < descriptor->nodeCount; ++node) {
-            if (descriptor->nodes[node].error != 0) {
+        for (uint32_t worker = 0; worker < descriptor->workerCount; ++worker) {
+            if (descriptor->workers[worker].error != 0) {
                 anyError = true;
             }
         }
@@ -840,10 +857,11 @@ int runSession(Descriptor* descriptor, int nodeId, bool creator, const std::vect
     }
 
     if (descriptor->abort == 0 && slot.error == 0) {
+        const DsmStats statsBefore = apps::readNodeStats();
         const Clock::time_point start = Clock::now();
         const int status = descriptor->mode == kModeCompress ? compressSlot(*descriptor, slot)
                                                              : decompressSlot(*descriptor, slot);
-        recordStats(slot, start);
+        recordStats(slot, start, statsBefore);
         if (status != DSM_OK) {
             slot.error = status;
         }
@@ -859,8 +877,8 @@ int runSession(Descriptor* descriptor, int nodeId, bool creator, const std::vect
     int result = 0;
     if (creator) {
         bool anyError = descriptor->abort != 0;
-        for (uint32_t node = 0; node < descriptor->nodeCount; ++node) {
-            if (descriptor->nodes[node].error != 0) {
+        for (uint32_t worker = 0; worker < descriptor->workerCount; ++worker) {
+            if (descriptor->workers[worker].error != 0) {
                 anyError = true;
             }
         }
@@ -937,19 +955,23 @@ int runJoiner(const Options& options) {
         std::fprintf(stderr, "descriptor has an invalid mode\n");
         return 1;
     }
-    if (descriptor->nodeCount == 0 || descriptor->nodeCount > kMaximumNodes) {
-        std::fprintf(stderr, "descriptor has an invalid node count\n");
+    if (descriptor->workerCount == 0 || descriptor->workerCount > kMaximumWorkers) {
+        std::fprintf(stderr, "descriptor has an invalid worker count\n");
         return 1;
     }
-    if (options.nodeId <= 0 || static_cast<uint32_t>(options.nodeId) >= descriptor->nodeCount) {
-        std::fprintf(stderr, "node %d is not part of this run\n", options.nodeId);
+    if (descriptor->barrierId < 0 || descriptor->mutexId < 0) {
+        std::fprintf(stderr, "descriptor has an invalid barrier or mutex\n");
         return 1;
     }
-    if (descriptor->barrierId < 0) {
-        std::fprintf(stderr, "descriptor has an invalid barrier\n");
+    uint32_t workerIndex = 0;
+    if (!apps::claimWorkerIndex(descriptor->mutexId, descriptor->joinedWorkers, descriptor->workerCount,
+                                workerIndex)) {
         return 1;
     }
-    return runSession(descriptor, options.nodeId, false, nullptr, nullptr, std::string());
+    std::printf("Joined as worker %u of %u\n", static_cast<unsigned>(workerIndex),
+                static_cast<unsigned>(descriptor->workerCount));
+    std::fflush(stdout);
+    return runSession(descriptor, static_cast<int>(workerIndex), false, nullptr, nullptr, std::string());
 }
 
 }

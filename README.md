@@ -43,19 +43,39 @@ guest command, which another node runs to wait for the mutex while the host hold
 ./build/sync_demo --node 1 guest 0x0 0x0
 ```
 
-Game of Life splits the grid into row slabs, one per node, and exchanges only the two halo rows
-after each generation. Node 0 prints the exact join command for the other nodes:
+The test applications only use the DSM library, so they run on any node and do not depend on node
+ids. The process started without `--join` creates the run, becomes worker 0 and prints the join
+command; run that command once per remaining worker, on any machine of the cluster. Each joining
+process takes the next free worker index under a DSM mutex. `--node` is needed only when several
+nodes run on the same machine.
+
+Game of Life splits the grid into row slabs, one per worker, and exchanges only the two halo rows
+after each generation:
 
 ```sh
-./build/life --node 0 --nodes 3 --width 32768 --height 32768 --generations 100 --snapshot-every 25 --ppm /tmp/life
-./build/life --node 1 --join 0x100000000000 --threads 4
-./build/life --node 2 --join 0x100000000000 --threads 4
+./build/life --workers 3 --width 32768 --height 32768 --generations 100 --snapshot-every 25 --ppm /tmp/life
+./build/life --join 0x100000000000 --threads 4
+./build/life --join 0x100000000000 --threads 4
 ```
 
 Use `--ascii` to render frames in the terminal instead of writing PPM files, and `--wrap` for a
-toroidal grid. Each node stores two grid buffers plus a display buffer; a 32768 x 32768 grid with
-three nodes needs roughly 720 MB of DSM memory per node. Raise the node memory in
-`config/cluster.json` accordingly before running the full-size demo.
+toroidal grid. Each worker stores two grid buffers plus a display buffer, and every grid row takes
+at least one 4096-byte page; a 32768 x 32768 grid with three workers needs roughly 720 MB of DSM
+memory per worker. Raise the node memory in `config/cluster.json` accordingly before running the
+full-size demo.
+
+The compression application splits a file into blocks and compresses or decompresses them in
+parallel with LZSS:
+
+```sh
+./build/compress --workers 3 compress input.bin output.dsmc
+./build/compress --join 0x100000000000
+./build/compress --join 0x100000000000
+./build/compress --workers 3 decompress output.dsmc restored.bin
+```
+
+Both applications report the page faults, pages sent and received and invalidations of each worker
+during the run only. Workers attached to the same node share that node's counters.
 
 Query the cluster:
 
