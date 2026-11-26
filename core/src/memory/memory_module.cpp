@@ -266,6 +266,17 @@ DsmStatus MemoryModule::release(uintptr_t address, uint64_t& outPageCount) {
     return releaseLocally(address, outPageCount);
 }
 
+uint64_t MemoryModule::releaseProcess(uint32_t processId) {
+    uint64_t releasedPages = 0;
+    for (uint64_t firstPageIndex : registry_.blocksOf(processId)) {
+        uint64_t pageCount = 0;
+        if (releaseLocally(addressMap_.pageAddress(firstLocalPageId_ + firstPageIndex), pageCount) == DSM_OK) {
+            releasedPages += pageCount;
+        }
+    }
+    return releasedPages;
+}
+
 DsmStatus MemoryModule::releaseOnHome(uint32_t homeNode, uintptr_t address, uint64_t& outPageCount) {
     Message response;
     const DsmStatus status =

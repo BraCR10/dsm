@@ -61,6 +61,7 @@ public:
 
     uintptr_t allocate(size_t size, uint32_t processId, DsmStatus& outStatus);
     DsmStatus release(uintptr_t address, uint64_t& outPageCount);
+    uint64_t releaseProcess(uint32_t processId);
     void resolveApplicationFault(uintptr_t address, bool isWrite, const FaultReply& replyWhilePageIsLocked);
     DsmStatus pageState(uintptr_t address, MsiState& outState);
     std::vector<PageTableEntry> pageTableView();

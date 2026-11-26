@@ -96,6 +96,12 @@ void LocalService::onClientClosed(Client& client) {
     if (client.attached.load()) {
         common::logInfo(kModule, common::fromProcess(client.processId), "process detached");
         sync_.releaseProcess(client.processId);
+        const uint64_t releasedPages = memory_.releaseProcess(client.processId);
+        if (releasedPages > 0) {
+            common::logInfo(kModule, common::fromProcess(client.processId),
+                            "released %llu pages the process did not free",
+                            static_cast<unsigned long long>(releasedPages));
+        }
     }
 }
 
