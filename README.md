@@ -43,6 +43,20 @@ guest command, which another node runs to wait for the mutex while the host hold
 ./build/sync_demo --node 1 guest 0x0 0x0
 ```
 
+Game of Life splits the grid into row slabs, one per node, and exchanges only the two halo rows
+after each generation. Node 0 prints the exact join command for the other nodes:
+
+```sh
+./build/life --node 0 --nodes 3 --width 32768 --height 32768 --generations 100 --snapshot-every 25 --ppm /tmp/life
+./build/life --node 1 --join 0x100000000000 --threads 4
+./build/life --node 2 --join 0x100000000000 --threads 4
+```
+
+Use `--ascii` to render frames in the terminal instead of writing PPM files, and `--wrap` for a
+toroidal grid. Each node stores two grid buffers plus a display buffer; a 32768 x 32768 grid with
+three nodes needs roughly 720 MB of DSM memory per node. Raise the node memory in
+`config/cluster.json` accordingly before running the full-size demo.
+
 Query the cluster:
 
 ```sh
