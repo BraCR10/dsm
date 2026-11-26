@@ -20,6 +20,19 @@ ConfigResult configError(std::string message) {
     return {DSM_ERR_CONFIG, std::move(message)};
 }
 
+std::string memorySizeError(uint32_t nodeId, uint64_t memorySize, uint64_t pageSize) {
+    const std::string prefix = "memory_size of node " + std::to_string(nodeId) + " must be ";
+    const std::string page = std::to_string(pageSize);
+    if (memorySize == 0) {
+        return prefix + "at least page_size " + page;
+    }
+    const uint64_t lower = memorySize / pageSize * pageSize;
+    const uint64_t upper = lower + pageSize;
+    const std::string suggestion =
+        lower == 0 ? std::to_string(upper) : std::to_string(lower) + " or " + std::to_string(upper);
+    return prefix + "a multiple of page_size " + page + "; use " + suggestion;
+}
+
 bool isPowerOfTwo(uint64_t value) {
     return value != 0 && (value & (value - 1)) == 0;
 }
@@ -92,8 +105,7 @@ ConfigResult validateNodes(const ClusterConfig& config) {
             return configError("node " + std::to_string(node.nodeId) + " reuses a port of another node");
         }
         if (node.memorySize == 0 || node.memorySize % config.pageSize != 0) {
-            return configError("memory_size of node " + std::to_string(node.nodeId) +
-                               " must be a non-zero multiple of page_size");
+            return configError(memorySizeError(node.nodeId, node.memorySize, config.pageSize));
         }
         if (node.memorySize > config.nodeRangeSpacing) {
             return configError("memory_size of node " + std::to_string(node.nodeId) +
