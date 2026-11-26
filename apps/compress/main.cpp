@@ -548,6 +548,9 @@ bool distributeInput(Descriptor* descriptor, const std::vector<uint8_t>& file,
                      const std::vector<ParsedBlock>& parsed) {
     for (uint32_t worker = 0; worker < descriptor->workerCount; ++worker) {
         const WorkerSlot& slot = descriptor->workers[worker];
+        if (slot.blockStart == slot.blockEnd) {
+            continue;
+        }
         uint8_t* destination = bufferFromAddress(slot.input);
         if (descriptor->mode == kModeCompress) {
             const uint64_t offset = slot.blockStart * descriptor->blockSize;
