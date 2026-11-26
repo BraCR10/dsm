@@ -529,7 +529,7 @@ bool distributeInput(Descriptor* descriptor, const std::vector<uint8_t>& file,
         if (descriptor->mode == kModeCompress) {
             const uint64_t offset = slot.blockStart * descriptor->blockSize;
             if (offset + slot.inputBytes > file.size()) {
-                std::fprintf(stderr, "input range for worker %u is out of bounds\n", worker);
+                std::fprintf(stderr, "input range for worker %u is out of bounds\n", apps::workerNumber(worker));
                 return false;
             }
             if (slot.inputBytes > 0) {
@@ -543,7 +543,7 @@ bool distributeInput(Descriptor* descriptor, const std::vector<uint8_t>& file,
             const ParsedBlock& parsedBlock = parsed[static_cast<size_t>(block)];
             const uint64_t recordSize = sizeof(BlockRecord) + parsedBlock.record.compressedSize;
             if (cursor + recordSize > slot.inputBytes) {
-                std::fprintf(stderr, "input range for worker %u is out of bounds\n", worker);
+                std::fprintf(stderr, "input range for worker %u is out of bounds\n", apps::workerNumber(worker));
                 return false;
             }
             std::memcpy(destination + cursor, &parsedBlock.record, sizeof(BlockRecord));
@@ -555,7 +555,7 @@ bool distributeInput(Descriptor* descriptor, const std::vector<uint8_t>& file,
             }
         }
         if (cursor != slot.inputBytes) {
-            std::fprintf(stderr, "input range for worker %u is inconsistent\n", worker);
+            std::fprintf(stderr, "input range for worker %u is inconsistent\n", apps::workerNumber(worker));
             return false;
         }
     }
@@ -673,7 +673,7 @@ bool writeCompressedOutput(const Descriptor& descriptor, const std::string& path
         uint64_t cursor = 0;
         for (uint64_t block = slot.blockStart; block < slot.blockEnd; ++block) {
             if (cursor + sizeof(BlockRecord) > slot.outputBytes) {
-                std::fprintf(stderr, "worker %u produced an inconsistent output\n", worker);
+                std::fprintf(stderr, "worker %u produced an inconsistent output\n", apps::workerNumber(worker));
                 return false;
             }
             BlockRecord record{};
@@ -682,7 +682,7 @@ bool writeCompressedOutput(const Descriptor& descriptor, const std::string& path
                 record.rawSize != rawSizeOfBlock(descriptor.rawSize, descriptor.blockSize, block) ||
                 record.compressedSize > compressor::worstCaseSize(record.rawSize) ||
                 cursor + sizeof(BlockRecord) + record.compressedSize > slot.outputBytes) {
-                std::fprintf(stderr, "worker %u produced an invalid block %llu\n", worker,
+                std::fprintf(stderr, "worker %u produced an invalid block %llu\n", apps::workerNumber(worker),
                              static_cast<unsigned long long>(block));
                 return false;
             }
@@ -702,7 +702,7 @@ bool writeCompressedOutput(const Descriptor& descriptor, const std::string& path
             cursor += record.compressedSize;
         }
         if (cursor != slot.outputBytes) {
-            std::fprintf(stderr, "worker %u produced trailing output\n", worker);
+            std::fprintf(stderr, "worker %u produced trailing output\n", apps::workerNumber(worker));
             return false;
         }
     }
@@ -722,7 +722,7 @@ bool writeDecompressedOutput(const Descriptor& descriptor, const std::string& pa
     for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
         const WorkerSlot& slot = descriptor.workers[worker];
         if (slot.outputBytes != slot.rawBytes) {
-            std::fprintf(stderr, "worker %u produced an inconsistent output\n", worker);
+            std::fprintf(stderr, "worker %u produced an inconsistent output\n", apps::workerNumber(worker));
             return false;
         }
         const uint8_t* buffer = readBufferFromAddress(slot.output);
@@ -780,7 +780,7 @@ void printSummary(const Descriptor& descriptor) {
         std::printf(
             "  worker %u blocks [%llu, %llu) raw %llu bytes, out %llu bytes, %.3f s, "
             "faults %llu sent %llu recv %llu invalidations %llu\n",
-            static_cast<unsigned>(worker), static_cast<unsigned long long>(slot.blockStart),
+            apps::workerNumber(worker), static_cast<unsigned long long>(slot.blockStart),
             static_cast<unsigned long long>(slot.blockEnd),
             static_cast<unsigned long long>(slot.rawBytes),
             static_cast<unsigned long long>(slot.outputBytes),
@@ -812,7 +812,7 @@ void printErrors(const Descriptor& descriptor) {
     for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
         const int32_t error = descriptor.workers[worker].error;
         if (error != 0) {
-            std::fprintf(stderr, "worker %u failed: %s (status %d)\n", worker, describeWorkerError(error), error);
+            std::fprintf(stderr, "worker %u failed: %s (status %d)\n", apps::workerNumber(worker), describeWorkerError(error), error);
         }
     }
 }
@@ -968,7 +968,7 @@ int runJoiner(const Options& options) {
                                 workerIndex)) {
         return 1;
     }
-    std::printf("Joined as worker %u of %u\n", static_cast<unsigned>(workerIndex),
+    std::printf("Joined as worker %u of %u\n", apps::workerNumber(workerIndex),
                 static_cast<unsigned>(descriptor->workerCount));
     std::fflush(stdout);
     return runSession(descriptor, static_cast<int>(workerIndex), false, nullptr, nullptr, std::string());

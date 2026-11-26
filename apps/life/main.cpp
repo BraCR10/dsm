@@ -525,7 +525,7 @@ void printSummary(const Descriptor& descriptor) {
         std::printf(
             "  worker %u rows [%llu, %llu) live %llu checksum %016llx faults %llu sent %llu recv %llu "
             "invalidations %llu time %.3f s\n",
-            static_cast<unsigned>(worker), static_cast<unsigned long long>(slot.rowStart),
+            apps::workerNumber(worker), static_cast<unsigned long long>(slot.rowStart),
             static_cast<unsigned long long>(slot.rowStart + slot.rowCount),
             static_cast<unsigned long long>(slot.liveCells), static_cast<unsigned long long>(slot.checksum),
             static_cast<unsigned long long>(slot.pageFaults), static_cast<unsigned long long>(slot.pagesSent),
@@ -729,7 +729,7 @@ int runJoiner(const Options& options) {
                                 workerIndex)) {
         return 1;
     }
-    std::printf("Joined as worker %u of %u\n", static_cast<unsigned>(workerIndex),
+    std::printf("Joined as worker %u of %u\n", apps::workerNumber(workerIndex),
                 static_cast<unsigned>(descriptor->workerCount));
     std::fflush(stdout);
     const int worker = static_cast<int>(workerIndex);

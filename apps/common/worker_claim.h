@@ -10,6 +10,11 @@ namespace apps {
 
 // The creator of a run is worker 0 and sets joinedWorkers to 1. Every process that joins takes the
 // next free worker index under the run's DSM mutex, so worker indices never depend on DSM node ids.
+// Worker indices start at 0 inside the run; people read them starting at 1.
+inline unsigned workerNumber(uint32_t workerIndex) {
+    return static_cast<unsigned>(workerIndex) + 1;
+}
+
 // The creator destroys the mutex once every worker has joined, so a missing mutex means a full run.
 inline bool claimWorkerIndex(int32_t mutexId, uint32_t& joinedWorkers, uint32_t workerCount,
                              uint32_t& outWorkerIndex) {
