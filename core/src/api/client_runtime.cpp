@@ -94,6 +94,7 @@ DsmStatus ClientRuntime::attach(int requestedNodeId) {
         channel_->stop();
         return status == DSM_OK ? DSM_ERR_INTERNAL : status;
     }
+    windowMapped_.store(true);
     resolverRunning_.store(true);
     resolverThread_ = std::thread(&ClientRuntime::resolverLoop, this);
     return DSM_OK;
@@ -107,6 +108,7 @@ void ClientRuntime::detach() {
     resolverThread_.join();
     memory::uninstallFaultHandler();
     channel_->stop();
+    windowMapped_.store(false);
     window_.close();
 }
 
@@ -137,9 +139,9 @@ void ClientRuntime::handleNodeRequest(const Message& request) {
     }
     const auto protection = decodeProtection(request.payload);
     Message response = makeMessage(MessageType::LocalSetProtectionAck);
-    if (protection) {
+    if (protection && windowMapped_.load()) {
         protectPage(protection->pageId, static_cast<int>(protection->protection));
-    } else {
+    } else if (!protection) {
         response.header.status = DSM_ERR_INVALID_MESSAGE;
     }
     channel_->reply(request, std::move(response));

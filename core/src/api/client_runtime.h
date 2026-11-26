@@ -66,6 +66,7 @@ private:
     memory::SharedWindow window_;
     memory::PendingFaults pendingFaults_;
     std::atomic<bool> resolverRunning_{false};
+    std::atomic<bool> windowMapped_{false};
     std::thread resolverThread_;
 };
 

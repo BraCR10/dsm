@@ -556,7 +556,6 @@ void MemoryModule::handleStorageRequest(const IncomingMessage& incoming) {
     const uint64_t granted = capacity_.reserveUpTo(request->pageCount);
     for (uint64_t pageId = request->firstPageId; pageId < request->firstPageId + granted; ++pageId) {
         PageTable::Operation operation(msi_.pageTable(), pageId, *homeNode);
-        restrictApplications(pageId, PROT_NONE);
         window_.discardPage(pageId * config_.pageSize, config_.pageSize);
         operation.update([this, version = request->version](PageEntry& entry) {
             entry.state = MSI_MODIFIED;
