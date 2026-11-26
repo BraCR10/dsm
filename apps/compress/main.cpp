@@ -6,7 +6,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../common/run_stats.h"
@@ -96,6 +99,7 @@ struct Options {
     uint32_t workers = 1;
     uint64_t blockSize = kDefaultBlockSize;
     uint64_t joinAddress = 0;
+    int threads = 1;
     uint32_t mode = 0;
     std::string inputPath;
     std::string outputPath;
@@ -105,22 +109,33 @@ struct Options {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr int kMaximumThreads = 64;
+
+int defaultThreadCount() {
+    const unsigned hardware = std::thread::hardware_concurrency();
+    if (hardware == 0) {
+        return 1;
+    }
+    return static_cast<int>(std::min(hardware, 8u));
+}
+
 void printUsage() {
     std::printf(
         "Usage:\n"
-        "  compress [--config <path>] [--node <id>] [--workers <n>] [--block-size <bytes>] "
-        "compress <input> <output>\n"
-        "  compress [--config <path>] [--node <id>] [--workers <n>] [--block-size <bytes>] "
-        "decompress <input> <output>\n"
-        "  compress --join <descriptor_address> [--config <path>] [--node <id>]\n"
+        "  compress [--config <path>] [--node <id>] [--workers <n>] [--threads <t>] [--block-size <bytes>]\n"
+        "           compress <input> <output>\n"
+        "  compress [--config <path>] [--node <id>] [--workers <n>] [--threads <t>] [--block-size <bytes>]\n"
+        "           decompress <input> <output>\n"
+        "  compress --join <descriptor_address> [--config <path>] [--node <id>] [--threads <t>]\n"
         "\n"
-        "The process started without --join reads the input, becomes worker 0 and prints the join\n"
+        "The process started without --join reads the input, becomes worker 1 and prints the join\n"
         "command. Run that command once per remaining worker, on any machine of the cluster.\n"
         "--node picks the local DSM node only when several run on the same machine.\n"
+        "--threads splits the blocks of each worker among threads; it defaults to the cores of the machine.\n"
         "The compressed format is a header followed by independently compressed LZSS blocks.\n"
         "Example:\n"
         "  compress --workers 3 compress input.bin output.dsmc\n"
-        "  compress --join 0x100000000000\n"
+        "  compress --join 0x100000000000 --threads 4\n"
         "  compress --workers 3 decompress output.dsmc restored.bin\n");
 }
 
@@ -154,6 +169,7 @@ bool parseInt(const char* text, int& outValue) {
 
 bool parseOptions(int argumentCount, char** arguments, Options& options) {
     std::vector<std::string> positional;
+    options.threads = defaultThreadCount();
     for (int index = 1; index < argumentCount; ++index) {
         const std::string argument = arguments[index];
         const auto valueFor = [&](const char* name) -> const char* {
@@ -188,6 +204,13 @@ bool parseOptions(int argumentCount, char** arguments, Options& options) {
             }
             options.workers = static_cast<uint32_t>(value);
             options.creatorOptionGiven = true;
+        } else if (argument == "--threads") {
+            const char* text = valueFor("--threads");
+            if (text == nullptr || !parseInt(text, options.threads) || options.threads < 1 ||
+                options.threads > kMaximumThreads) {
+                std::fprintf(stderr, "invalid --threads value\n");
+                return false;
+            }
         } else if (argument == "--block-size") {
             const char* text = valueFor("--block-size");
             if (text == nullptr || !parseU64(text, options.blockSize) || options.blockSize == 0) {
@@ -480,8 +503,8 @@ void printStart(const Descriptor& descriptor, const Options& options) {
     if (descriptor.workerCount > 1) {
         std::printf("Run this command %u more time(s), on any machine of the cluster:\n",
                     static_cast<unsigned>(descriptor.workerCount - 1));
-        std::printf("  compress --join 0x%llx",
-                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(&descriptor)));
+        std::printf("  compress --join 0x%llx --threads %d",
+                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(&descriptor)), options.threads);
         if (options.configPath != kDefaultConfigPath) {
             std::printf(" --config %s", options.configPath.c_str());
         }
@@ -562,78 +585,145 @@ bool distributeInput(Descriptor* descriptor, const std::vector<uint8_t>& file,
     return true;
 }
 
-int compressSlot(const Descriptor& descriptor, WorkerSlot& slot) {
-    const uint8_t* input = readBufferFromAddress(slot.input);
-    uint8_t* output = bufferFromAddress(slot.output);
-    uint64_t inputOffset = 0;
-    uint64_t outputOffset = 0;
-    std::vector<uint8_t> compressed;
-
-    for (uint64_t block = slot.blockStart; block < slot.blockEnd; ++block) {
-        const uint64_t rawSize = rawSizeOfBlock(descriptor.rawSize, descriptor.blockSize, block);
-        compressed.clear();
-        if (!compressor::encode(input + inputOffset, static_cast<size_t>(rawSize), compressed)) {
-            return DSM_ERR_INTERNAL;
-        }
-        if (outputOffset + sizeof(BlockRecord) + compressed.size() > slot.outputCapacity) {
-            return DSM_ERR_NO_MEMORY;
-        }
-        const BlockRecord record{block, rawSize, compressed.size(),
-                                 compressor::checksum(input + inputOffset, static_cast<size_t>(rawSize))};
-        std::memcpy(output + outputOffset, &record, sizeof(record));
-        outputOffset += sizeof(record);
-        if (!compressed.empty()) {
-            std::memcpy(output + outputOffset, compressed.data(), compressed.size());
-            outputOffset += compressed.size();
-        }
-        inputOffset += rawSize;
+// Splits the blocks of a worker into one contiguous range per thread and returns the first error.
+int runInThreads(uint64_t itemCount, int threads, const std::function<int(uint64_t, uint64_t)>& work) {
+    if (itemCount == 0) {
+        return DSM_OK;
     }
-    if (inputOffset != slot.inputBytes) {
-        return DSM_ERR_SIZE_MISMATCH;
+    const uint64_t threadCount = std::min<uint64_t>(static_cast<uint64_t>(std::max(1, threads)), itemCount);
+    const uint64_t chunk = (itemCount + threadCount - 1) / threadCount;
+    std::vector<int> statuses(static_cast<size_t>(threadCount), DSM_OK);
+    std::vector<std::thread> pool;
+    for (uint64_t index = 0; index < threadCount; ++index) {
+        const uint64_t first = index * chunk;
+        const uint64_t last = std::min(itemCount, first + chunk);
+        pool.emplace_back([&work, &statuses, index, first, last] { statuses[index] = work(first, last); });
     }
-    slot.outputBytes = outputOffset;
+    for (std::thread& thread : pool) {
+        thread.join();
+    }
+    for (int status : statuses) {
+        if (status != DSM_OK) {
+            return status;
+        }
+    }
     return DSM_OK;
 }
 
-int decompressSlot(const Descriptor& descriptor, WorkerSlot& slot) {
+// Every block of a worker has a fixed place in its output buffer, as large as its worst case, so the
+// threads of the worker write their blocks at the same time without knowing the sizes of the others.
+std::vector<uint64_t> compressedBlockOffsets(const Descriptor& descriptor, const WorkerSlot& slot) {
+    std::vector<uint64_t> offsets;
+    uint64_t offset = 0;
+    for (uint64_t block = slot.blockStart; block < slot.blockEnd; ++block) {
+        offsets.push_back(offset);
+        offset += sizeof(BlockRecord) +
+                  compressor::worstCaseSize(rawSizeOfBlock(descriptor.rawSize, descriptor.blockSize, block));
+    }
+    return offsets;
+}
+
+uint64_t rawBytesOfBlocks(const Descriptor& descriptor, uint64_t firstBlock, uint64_t endBlock) {
+    uint64_t bytes = 0;
+    for (uint64_t block = firstBlock; block < endBlock; ++block) {
+        bytes += rawSizeOfBlock(descriptor.rawSize, descriptor.blockSize, block);
+    }
+    return bytes;
+}
+
+int compressSlot(const Descriptor& descriptor, WorkerSlot& slot, int threads) {
     const uint8_t* input = readBufferFromAddress(slot.input);
     uint8_t* output = bufferFromAddress(slot.output);
-    uint64_t inputOffset = 0;
-    uint64_t outputOffset = 0;
+    const uint64_t blockCount = slot.blockEnd - slot.blockStart;
+    if (rawBytesOfBlocks(descriptor, slot.blockStart, slot.blockEnd) != slot.inputBytes) {
+        return DSM_ERR_SIZE_MISMATCH;
+    }
+    const std::vector<uint64_t> outputOffsets = compressedBlockOffsets(descriptor, slot);
+    std::vector<uint64_t> storedBytes(static_cast<size_t>(blockCount), 0);
+    const int status = runInThreads(blockCount, threads, [&](uint64_t first, uint64_t last) {
+        std::vector<uint8_t> compressed;
+        for (uint64_t local = first; local < last; ++local) {
+            const uint64_t block = slot.blockStart + local;
+            const uint64_t rawSize = rawSizeOfBlock(descriptor.rawSize, descriptor.blockSize, block);
+            const uint8_t* raw = input + local * descriptor.blockSize;
+            if (!compressor::encode(raw, static_cast<size_t>(rawSize), compressed)) {
+                return static_cast<int>(DSM_ERR_INTERNAL);
+            }
+            const BlockRecord record{block, rawSize, compressed.size(),
+                                     compressor::checksum(raw, static_cast<size_t>(rawSize))};
+            uint8_t* place = output + outputOffsets[static_cast<size_t>(local)];
+            std::memcpy(place, &record, sizeof(record));
+            if (!compressed.empty()) {
+                std::memcpy(place + sizeof(record), compressed.data(), compressed.size());
+            }
+            storedBytes[static_cast<size_t>(local)] = sizeof(record) + compressed.size();
+        }
+        return static_cast<int>(DSM_OK);
+    });
+    if (status != DSM_OK) {
+        return status;
+    }
+    slot.outputBytes = std::accumulate(storedBytes.begin(), storedBytes.end(), uint64_t{0});
+    return DSM_OK;
+}
 
+int locateCompressedBlocks(const Descriptor& descriptor, const WorkerSlot& slot, std::vector<uint64_t>& outOffsets) {
+    const uint8_t* input = readBufferFromAddress(slot.input);
+    uint64_t inputOffset = 0;
     for (uint64_t block = slot.blockStart; block < slot.blockEnd; ++block) {
         if (inputOffset + sizeof(BlockRecord) > slot.inputBytes) {
             return DSM_ERR_SIZE_MISMATCH;
         }
         BlockRecord record{};
         std::memcpy(&record, input + inputOffset, sizeof(record));
-        inputOffset += sizeof(record);
         if (record.index != block) {
             return DSM_ERR_INVALID_MESSAGE;
         }
         const uint64_t expectedRaw = rawSizeOfBlock(descriptor.rawSize, descriptor.blockSize, block);
-        if (record.rawSize != expectedRaw || record.compressedSize > slot.inputBytes - inputOffset) {
+        if (record.rawSize != expectedRaw ||
+            record.compressedSize > slot.inputBytes - inputOffset - sizeof(BlockRecord)) {
             return DSM_ERR_SIZE_MISMATCH;
         }
-        if (outputOffset + record.rawSize > slot.outputCapacity) {
-            return DSM_ERR_NO_MEMORY;
-        }
-        size_t produced = 0;
-        if (!compressor::decode(input + inputOffset, static_cast<size_t>(record.compressedSize),
-                                output + outputOffset, static_cast<size_t>(record.rawSize), produced)) {
-            return DSM_ERR_INVALID_MESSAGE;
-        }
-        if (produced != record.rawSize ||
-            compressor::checksum(output + outputOffset, produced) != record.rawChecksum) {
-            return DSM_ERR_INVALID_MESSAGE;
-        }
-        inputOffset += record.compressedSize;
-        outputOffset += record.rawSize;
+        outOffsets.push_back(inputOffset);
+        inputOffset += sizeof(BlockRecord) + record.compressedSize;
     }
-    if (inputOffset != slot.inputBytes) {
-        return DSM_ERR_SIZE_MISMATCH;
+    return inputOffset == slot.inputBytes ? DSM_OK : DSM_ERR_SIZE_MISMATCH;
+}
+
+int decompressSlot(const Descriptor& descriptor, WorkerSlot& slot, int threads) {
+    const uint8_t* input = readBufferFromAddress(slot.input);
+    uint8_t* output = bufferFromAddress(slot.output);
+    const uint64_t blockCount = slot.blockEnd - slot.blockStart;
+    std::vector<uint64_t> inputOffsets;
+    const int located = locateCompressedBlocks(descriptor, slot, inputOffsets);
+    if (located != DSM_OK) {
+        return located;
     }
-    slot.outputBytes = outputOffset;
+    const int status = runInThreads(blockCount, threads, [&](uint64_t first, uint64_t last) {
+        for (uint64_t local = first; local < last; ++local) {
+            BlockRecord record{};
+            const uint8_t* place = input + inputOffsets[static_cast<size_t>(local)];
+            std::memcpy(&record, place, sizeof(record));
+            const uint64_t outputOffset = local * descriptor.blockSize;
+            if (outputOffset + record.rawSize > slot.outputCapacity) {
+                return static_cast<int>(DSM_ERR_NO_MEMORY);
+            }
+            size_t produced = 0;
+            if (!compressor::decode(place + sizeof(record), static_cast<size_t>(record.compressedSize),
+                                    output + outputOffset, static_cast<size_t>(record.rawSize), produced)) {
+                return static_cast<int>(DSM_ERR_INVALID_MESSAGE);
+            }
+            if (produced != record.rawSize ||
+                compressor::checksum(output + outputOffset, produced) != record.rawChecksum) {
+                return static_cast<int>(DSM_ERR_INVALID_MESSAGE);
+            }
+        }
+        return static_cast<int>(DSM_OK);
+    });
+    if (status != DSM_OK) {
+        return status;
+    }
+    slot.outputBytes = rawBytesOfBlocks(descriptor, slot.blockStart, slot.blockEnd);
     return DSM_OK;
 }
 
@@ -670,18 +760,15 @@ bool writeCompressedOutput(const Descriptor& descriptor, const std::string& path
     for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
         const WorkerSlot& slot = descriptor.workers[worker];
         const uint8_t* buffer = readBufferFromAddress(slot.output);
-        uint64_t cursor = 0;
+        const std::vector<uint64_t> offsets = compressedBlockOffsets(descriptor, slot);
+        uint64_t storedBytes = 0;
         for (uint64_t block = slot.blockStart; block < slot.blockEnd; ++block) {
-            if (cursor + sizeof(BlockRecord) > slot.outputBytes) {
-                std::fprintf(stderr, "worker %u produced an inconsistent output\n", apps::workerNumber(worker));
-                return false;
-            }
+            const uint8_t* place = buffer + offsets[static_cast<size_t>(block - slot.blockStart)];
             BlockRecord record{};
-            std::memcpy(&record, buffer + cursor, sizeof(record));
+            std::memcpy(&record, place, sizeof(record));
             if (record.index != block ||
                 record.rawSize != rawSizeOfBlock(descriptor.rawSize, descriptor.blockSize, block) ||
-                record.compressedSize > compressor::worstCaseSize(record.rawSize) ||
-                cursor + sizeof(BlockRecord) + record.compressedSize > slot.outputBytes) {
+                record.compressedSize > compressor::worstCaseSize(record.rawSize)) {
                 std::fprintf(stderr, "worker %u produced an invalid block %llu\n", apps::workerNumber(worker),
                              static_cast<unsigned long long>(block));
                 return false;
@@ -690,19 +777,18 @@ bool writeCompressedOutput(const Descriptor& descriptor, const std::string& path
                 std::fprintf(stderr, "cannot write %s\n", path.c_str());
                 return false;
             }
-            cursor += sizeof(BlockRecord);
             staging.resize(static_cast<size_t>(record.compressedSize));
             if (!staging.empty()) {
-                std::memcpy(staging.data(), buffer + cursor, staging.size());
+                std::memcpy(staging.data(), place + sizeof(record), staging.size());
             }
             if (!writeData(output, staging.data(), staging.size())) {
                 std::fprintf(stderr, "cannot write %s\n", path.c_str());
                 return false;
             }
-            cursor += record.compressedSize;
+            storedBytes += sizeof(BlockRecord) + record.compressedSize;
         }
-        if (cursor != slot.outputBytes) {
-            std::fprintf(stderr, "worker %u produced trailing output\n", apps::workerNumber(worker));
+        if (storedBytes != slot.outputBytes) {
+            std::fprintf(stderr, "worker %u produced an inconsistent output\n", apps::workerNumber(worker));
             return false;
         }
     }
@@ -812,13 +898,14 @@ void printErrors(const Descriptor& descriptor) {
     for (uint32_t worker = 0; worker < descriptor.workerCount; ++worker) {
         const int32_t error = descriptor.workers[worker].error;
         if (error != 0) {
-            std::fprintf(stderr, "worker %u failed: %s (status %d)\n", apps::workerNumber(worker), describeWorkerError(error), error);
+            std::fprintf(stderr, "worker %u failed: %s (status %d)\n", apps::workerNumber(worker),
+                         describeWorkerError(error), error);
         }
     }
 }
 
 int runSession(Descriptor* descriptor, int workerIndex, bool creator, const std::vector<uint8_t>* file,
-               const std::vector<ParsedBlock>* parsed, const std::string& outputPath) {
+               const std::vector<ParsedBlock>* parsed, const std::string& outputPath, int threads) {
     WorkerSlot& slot = descriptor->workers[workerIndex];
     if (!allocateSlot(slot)) {
         slot.error = DSM_ERR_NO_MEMORY;
@@ -859,8 +946,8 @@ int runSession(Descriptor* descriptor, int workerIndex, bool creator, const std:
     if (descriptor->abort == 0 && slot.error == 0) {
         const DsmStats statsBefore = apps::readNodeStats();
         const Clock::time_point start = Clock::now();
-        const int status = descriptor->mode == kModeCompress ? compressSlot(*descriptor, slot)
-                                                             : decompressSlot(*descriptor, slot);
+        const int status = descriptor->mode == kModeCompress ? compressSlot(*descriptor, slot, threads)
+                                                             : decompressSlot(*descriptor, slot, threads);
         recordStats(slot, start, statsBefore);
         if (status != DSM_OK) {
             slot.error = status;
@@ -941,7 +1028,7 @@ int runCreator(const Options& options) {
         return 1;
     }
     printStart(*descriptor, options);
-    return runSession(descriptor, 0, true, &file, &parsed, options.outputPath);
+    return runSession(descriptor, 0, true, &file, &parsed, options.outputPath, options.threads);
 }
 
 int runJoiner(const Options& options) {
@@ -971,7 +1058,8 @@ int runJoiner(const Options& options) {
     std::printf("Joined as worker %u of %u\n", apps::workerNumber(workerIndex),
                 static_cast<unsigned>(descriptor->workerCount));
     std::fflush(stdout);
-    return runSession(descriptor, static_cast<int>(workerIndex), false, nullptr, nullptr, std::string());
+    return runSession(descriptor, static_cast<int>(workerIndex), false, nullptr, nullptr, std::string(),
+                      options.threads);
 }
 
 }

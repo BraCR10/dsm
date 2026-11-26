@@ -101,7 +101,7 @@ void printUsage() {
         "       [--ascii] [--clear] [--wrap]\n"
         "  life --join <descriptor_address> [--config <path>] [--node <id>] [--threads <t>]\n"
         "\n"
-        "The process started without --join creates the grid, becomes worker 0 and prints the\n"
+        "The process started without --join creates the grid, becomes worker 1 and prints the\n"
         "join command. Run that command once per remaining worker, on any machine of the cluster.\n"
         "--node picks the local DSM node only when several run on the same machine.\n"
         "Example:\n"

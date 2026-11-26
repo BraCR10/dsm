@@ -51,7 +51,7 @@ guest command, which another node runs to wait for the mutex while the host hold
 ```
 
 The test applications only use the DSM library, so they run on any node and do not depend on node
-ids. The process started without `--join` creates the run, becomes worker 0 and prints the join
+ids. The process started without `--join` creates the run, becomes worker 1 and prints the join
 command; run that command once per remaining worker, on any machine of the cluster. Each joining
 process takes the next free worker index under a DSM mutex. `--node` is needed only when several
 nodes run on the same machine.
@@ -75,11 +75,14 @@ The compression application splits a file into blocks and compresses or decompre
 parallel with LZSS:
 
 ```sh
-./build/compress --workers 3 compress input.bin output.dsmc
-./build/compress --join 0x100000000000
-./build/compress --join 0x100000000000
+./build/compress --workers 3 --threads 4 compress input.bin output.dsmc
+./build/compress --join 0x100000000000 --threads 4
+./build/compress --join 0x100000000000 --threads 4
 ./build/compress --workers 3 decompress output.dsmc restored.bin
 ```
+
+`--threads` splits the blocks of each worker among threads of that process, as in Life; it defaults
+to the cores of the machine. The compressed file is the same with any number of threads.
 
 Both applications report the page faults, pages sent and received and invalidations of each worker
 during the run only. Workers attached to the same node share that node's counters.
