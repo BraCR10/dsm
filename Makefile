@@ -28,9 +28,13 @@ SYNC_DEMO_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(wildcard apps/sync_demo
 LIFE_BINARY := $(BUILD_DIR)/life
 LIFE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(wildcard apps/life/*.cpp))
 
+COMPRESS_BINARY := $(BUILD_DIR)/compress
+COMPRESS_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(wildcard apps/compress/*.cpp))
+
 .PHONY: all test clean
 
-all: $(LIBRARY) $(NODE_BINARY) $(CLI_BINARY) $(DEMO_BINARY) $(SYNC_DEMO_BINARY) $(LIFE_BINARY)
+all: $(LIBRARY) $(NODE_BINARY) $(CLI_BINARY) $(DEMO_BINARY) $(SYNC_DEMO_BINARY) $(LIFE_BINARY) \
+	$(COMPRESS_BINARY)
 
 $(LIBRARY): $(LIBRARY_OBJECTS)
 	@mkdir -p $(dir $@)
@@ -54,6 +58,9 @@ $(SYNC_DEMO_BINARY): $(SYNC_DEMO_OBJECTS) $(LIBRARY)
 $(LIFE_BINARY): $(LIFE_OBJECTS) $(LIBRARY)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS)
 
+$(COMPRESS_BINARY): $(COMPRESS_OBJECTS) $(LIBRARY)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS)
+
 $(BUILD_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -69,4 +76,4 @@ endif
 clean:
 	rm -rf $(BUILD_DIR)
 
--include $(LIBRARY_OBJECTS:.o=.d) $(TEST_OBJECTS:.o=.d) $(NODE_OBJECTS:.o=.d) $(CLI_OBJECTS:.o=.d) $(DEMO_OBJECTS:.o=.d) $(SYNC_DEMO_OBJECTS:.o=.d) $(LIFE_OBJECTS:.o=.d)
+-include $(LIBRARY_OBJECTS:.o=.d) $(TEST_OBJECTS:.o=.d) $(NODE_OBJECTS:.o=.d) $(CLI_OBJECTS:.o=.d) $(DEMO_OBJECTS:.o=.d) $(SYNC_DEMO_OBJECTS:.o=.d) $(LIFE_OBJECTS:.o=.d) $(COMPRESS_OBJECTS:.o=.d)
