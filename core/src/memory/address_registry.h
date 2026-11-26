@@ -14,6 +14,10 @@ struct PageUsage {
     uint32_t pageOrder = 0;
 };
 
+// Pages of addresses one node can hand out: the memory of the whole cluster, because one allocation
+// may store its pages on several nodes, limited by the address range that belongs to the node.
+uint64_t addressPagesFor(uint64_t pageSize, const std::vector<uint64_t>& nodeMemorySizes, uint64_t nodeRangeSpacing);
+
 struct Allocation {
     uint64_t firstPageIndex = 0;
     uint64_t pageCount = 0;
@@ -26,6 +30,7 @@ public:
     std::optional<Allocation> allocate(uint64_t pageCount, uint32_t processId);
     std::optional<Allocation> release(uint64_t firstPageIndex);
     bool isBlockStart(uint64_t pageIndex);
+    std::vector<uint64_t> blocksOf(uint32_t processId);
     std::optional<PageUsage> usageOf(uint64_t pageIndex);
     uint64_t freePageCount();
     uint64_t totalPageCount() const { return totalPageCount_; }

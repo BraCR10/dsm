@@ -4,18 +4,38 @@
 
 namespace dsm::memory {
 
-std::vector<uint8_t> encodeMemoryRequest(const MemoryRequestPayload& payload) {
+std::vector<uint8_t> encodeStorageRequest(const StorageRequestPayload& payload) {
     network::ByteWriter writer;
+    writer.writeU64(payload.firstPageId);
     writer.writeU64(payload.pageCount);
-    writer.writeU32(payload.processId);
+    writer.writeU64(payload.version);
     return writer.take();
 }
 
-std::optional<MemoryRequestPayload> decodeMemoryRequest(const std::vector<uint8_t>& bytes) {
+std::optional<StorageRequestPayload> decodeStorageRequest(const std::vector<uint8_t>& bytes) {
     network::ByteReader reader(bytes);
-    MemoryRequestPayload payload;
+    StorageRequestPayload payload;
+    payload.firstPageId = reader.readU64();
     payload.pageCount = reader.readU64();
-    payload.processId = reader.readU32();
+    payload.version = reader.readU64();
+    if (!reader.ok() || !reader.atEnd()) {
+        return std::nullopt;
+    }
+    return payload;
+}
+
+std::vector<uint8_t> encodeStorageRelease(const StorageReleasePayload& payload) {
+    network::ByteWriter writer;
+    writer.writeU64(payload.firstPageId);
+    writer.writeU64(payload.pageCount);
+    return writer.take();
+}
+
+std::optional<StorageReleasePayload> decodeStorageRelease(const std::vector<uint8_t>& bytes) {
+    network::ByteReader reader(bytes);
+    StorageReleasePayload payload;
+    payload.firstPageId = reader.readU64();
+    payload.pageCount = reader.readU64();
     if (!reader.ok() || !reader.atEnd()) {
         return std::nullopt;
     }

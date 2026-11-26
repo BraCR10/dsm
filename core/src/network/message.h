@@ -27,6 +27,8 @@ enum class MessageType : uint16_t {
     MemoryGrant = 11,
     MemoryFree = 12,
     MemoryFreeAck = 13,
+    StorageRelease = 14,
+    StorageReleaseAck = 15,
     PageRequest = 20,
     PageData = 21,
     PageRecall = 22,

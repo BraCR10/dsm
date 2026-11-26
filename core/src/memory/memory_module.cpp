@@ -3,6 +3,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "common/log.h"
@@ -43,6 +44,15 @@ int protectionFor(MsiState state) {
     return PROT_NONE;
 }
 
+std::vector<uint64_t> nodeMemorySizes(const settings::ClusterConfig& config, uint32_t selfNodeId,
+                                      uint64_t selfMemoryBytes) {
+    std::vector<uint64_t> sizes;
+    for (const settings::NodeConfig& node : config.nodes) {
+        sizes.push_back(node.nodeId == selfNodeId ? selfMemoryBytes : node.memorySize);
+    }
+    return sizes;
+}
+
 }  // namespace
 
 MemoryModule::MemoryModule(const settings::ClusterConfig& config, uint32_t selfNodeId, uint64_t sharedMemoryBytes,
@@ -53,14 +63,18 @@ MemoryModule::MemoryModule(const settings::ClusterConfig& config, uint32_t selfN
       firstLocalPageId_(addressMap_.pageIdOf(addressMap_.regionStart(selfNodeId))),
       network_(network),
       msi_(msi),
-      registry_(sharedMemoryBytes / config.pageSize),
+      registry_(addressPagesFor(config.pageSize, nodeMemorySizes(config, selfNodeId, sharedMemoryBytes),
+                                config.nodeRangeSpacing)),
+      capacity_(sharedMemoryBytes / config.pageSize),
       waitingRequestWorker_([this](const IncomingMessage& incoming) { handleWaitingRequest(incoming); }) {}
 
 DsmStatus MemoryModule::start() {
     const DsmStatus status = window_.createForNode(nodeSharedMemoryName(selfNodeId_), addressMap_.windowSize());
     if (status == DSM_OK) {
-        common::logInfo(kModule, common::fromSelf(), "shared window %s ready, local region at 0x%llx with %llu pages",
+        common::logInfo(kModule, common::fromSelf(),
+                        "shared window %s ready, stores %llu pages, local region at 0x%llx with addresses for %llu pages",
                         nodeSharedMemoryName(selfNodeId_).c_str(),
+                        static_cast<unsigned long long>(capacity_.totalPages()),
                         static_cast<unsigned long long>(addressMap_.regionStart(selfNodeId_)),
                         static_cast<unsigned long long>(registry_.totalPageCount()));
         waitingRequestWorker_.start();
@@ -81,7 +95,10 @@ void MemoryModule::registerHandlers() {
         waitingRequestWorker_.post(incoming);
     });
     network_.registerHandler(MessageType::MemoryRequest, [this](const IncomingMessage& incoming) {
-        waitingRequestWorker_.post(incoming);
+        handleStorageRequest(incoming);
+    });
+    network_.registerHandler(MessageType::StorageRelease, [this](const IncomingMessage& incoming) {
+        handleStorageRelease(incoming);
     });
     network_.registerHandler(MessageType::PageRecall, [this](const IncomingMessage& incoming) {
         handlePageRecall(incoming);
@@ -111,56 +128,131 @@ uintptr_t MemoryModule::allocate(size_t size, uint32_t processId, DsmStatus& out
         return 0;
     }
     const uint64_t pageCount = (size + config_.pageSize - 1) / config_.pageSize;
-    const uintptr_t address = allocateLocally(pageCount, processId, outStatus);
-    if (outStatus != DSM_ERR_NO_MEMORY) {
-        return address;
-    }
-    return allocateOnAnotherNode(pageCount, processId, outStatus);
-}
-
-uintptr_t MemoryModule::allocateLocally(uint64_t pageCount, uint32_t processId, DsmStatus& outStatus) {
     const auto allocation = registry_.allocate(pageCount, processId);
     if (!allocation) {
+        common::logError(kModule, common::fromProcess(processId),
+                         "cannot allocate %llu pages, the cluster has %llu pages of memory and this node has no "
+                         "free range of addresses that large",
+                         static_cast<unsigned long long>(pageCount),
+                         static_cast<unsigned long long>(registry_.totalPageCount()));
         outStatus = DSM_ERR_NO_MEMORY;
         return 0;
     }
     const uint64_t firstPageId = firstLocalPageId_ + allocation->firstPageIndex;
+    const uint64_t localPages = capacity_.reserveUpTo(pageCount);
+    const uint64_t version = nextVersionForRange(firstPageId + localPages, pageCount - localPages);
+    std::vector<StoragePart> remoteParts;
+    const uint64_t remotePages =
+        storeOnOtherNodes(firstPageId + localPages, pageCount - localPages, version, remoteParts);
+    if (localPages + remotePages < pageCount) {
+        for (const StoragePart& part : remoteParts) {
+            releaseStorageOn(part.nodeId, part.firstPageId, part.pageCount);
+        }
+        capacity_.release(localPages);
+        registry_.release(allocation->firstPageIndex);
+        common::logError(kModule, common::fromProcess(processId),
+                         "cannot allocate %llu pages, the cluster has only %llu free pages",
+                         static_cast<unsigned long long>(pageCount),
+                         static_cast<unsigned long long>(localPages + remotePages));
+        outStatus = DSM_ERR_NO_MEMORY;
+        return 0;
+    }
+    markPagesStoredLocally(firstPageId, localPages);
+    for (const StoragePart& part : remoteParts) {
+        markPagesStoredElsewhere(part, version);
+        common::logInfo(kModule, common::fromNode(part.nodeId),
+                        "stores %llu pages of the allocation at 0x%llx because local memory is full",
+                        static_cast<unsigned long long>(part.pageCount),
+                        static_cast<unsigned long long>(addressMap_.pageAddress(firstPageId)));
+    }
+    outStatus = DSM_OK;
+    return addressMap_.pageAddress(firstPageId);
+}
+
+uint64_t MemoryModule::storeOnOtherNodes(uint64_t firstPageId, uint64_t pageCount, uint64_t version,
+                                         std::vector<StoragePart>& outParts) {
+    uint64_t storedPages = 0;
+    if (pageCount == 0 || !remoteMemoryCandidates_) {
+        return storedPages;
+    }
+    for (uint32_t candidate : remoteMemoryCandidates_(0)) {
+        const uint64_t partFirstPageId = firstPageId + storedPages;
+        const uint64_t granted = requestStorage(candidate, partFirstPageId, pageCount - storedPages, version);
+        if (granted > 0) {
+            outParts.push_back({candidate, partFirstPageId, granted});
+            storedPages += granted;
+        }
+        if (storedPages == pageCount) {
+            break;
+        }
+    }
+    return storedPages;
+}
+
+uint64_t MemoryModule::requestStorage(uint32_t nodeId, uint64_t firstPageId, uint64_t pageCount, uint64_t version) {
+    Message response;
+    const DsmStatus status = network_.request(
+        nodeId, Channel::Main,
+        makeMessage(MessageType::MemoryRequest, encodeStorageRequest({firstPageId, pageCount, version})),
+        kMemoryRequestTimeoutMs, response);
+    const auto granted = decodeAddress(response.payload);
+    if (status != DSM_OK || response.header.status != DSM_OK || !granted || *granted > pageCount) {
+        if (status != DSM_OK) {
+            releaseStorageOn(nodeId, firstPageId, pageCount);
+        }
+        return 0;
+    }
+    return *granted;
+}
+
+void MemoryModule::releaseStorageOn(uint32_t nodeId, uint64_t firstPageId, uint64_t pageCount) {
+    Message response;
+    const DsmStatus status = network_.request(
+        nodeId, Channel::Main, makeMessage(MessageType::StorageRelease, encodeStorageRelease({firstPageId, pageCount})),
+        kMemoryRequestTimeoutMs, response);
+    if (status != DSM_OK) {
+        common::logError(kModule, common::fromNode(nodeId),
+                         "STORAGE_RELEASE for %llu pages at 0x%llx was not confirmed",
+                         static_cast<unsigned long long>(pageCount),
+                         static_cast<unsigned long long>(addressMap_.pageAddress(firstPageId)));
+    }
+}
+
+uint64_t MemoryModule::nextVersionForRange(uint64_t firstPageId, uint64_t pageCount) {
+    uint64_t newestVersion = 0;
+    for (uint64_t pageId = firstPageId; pageId < firstPageId + pageCount; ++pageId) {
+        PageTable::Operation operation(msi_.pageTable(), pageId, selfNodeId_);
+        newestVersion = std::max(newestVersion, operation.read().version);
+    }
+    return newestVersion + 1;
+}
+
+void MemoryModule::markPagesStoredLocally(uint64_t firstPageId, uint64_t pageCount) {
     for (uint64_t pageId = firstPageId; pageId < firstPageId + pageCount; ++pageId) {
         PageTable::Operation operation(msi_.pageTable(), pageId, selfNodeId_);
         operation.update([this](PageEntry& entry) {
             entry.allocated = true;
             entry.state = MSI_MODIFIED;
             entry.currentHolder = selfNodeId_;
+            entry.storageNode = selfNodeId_;
             entry.copies.clear();
         });
     }
-    outStatus = DSM_OK;
-    return addressMap_.pageAddress(firstPageId);
 }
 
-uintptr_t MemoryModule::allocateOnAnotherNode(uint64_t pageCount, uint32_t processId, DsmStatus& outStatus) {
-    outStatus = DSM_ERR_NO_MEMORY;
-    if (!remoteMemoryCandidates_) {
-        return 0;
+void MemoryModule::markPagesStoredElsewhere(const StoragePart& part, uint64_t version) {
+    for (uint64_t pageId = part.firstPageId; pageId < part.firstPageId + part.pageCount; ++pageId) {
+        PageTable::Operation operation(msi_.pageTable(), pageId, selfNodeId_);
+        restrictApplications(pageId, PROT_NONE);
+        operation.update([&part, version](PageEntry& entry) {
+            entry.allocated = true;
+            entry.state = MSI_INVALID;
+            entry.currentHolder = part.nodeId;
+            entry.storageNode = part.nodeId;
+            entry.version = version;
+            entry.copies.clear();
+        });
     }
-    for (uint32_t candidate : remoteMemoryCandidates_(pageCount * config_.pageSize)) {
-        Message response;
-        const DsmStatus status = network_.request(
-            candidate, Channel::Main,
-            makeMessage(MessageType::MemoryRequest, encodeMemoryRequest({pageCount, processId})),
-            kMemoryRequestTimeoutMs, response);
-        const auto address = decodeAddress(response.payload);
-        if (status == DSM_OK && response.header.status == DSM_OK && address) {
-            common::logInfo(kModule, common::fromNode(candidate),
-                            "granted %llu pages at 0x%llx because local memory is full",
-                            static_cast<unsigned long long>(pageCount), static_cast<unsigned long long>(*address));
-            outStatus = DSM_OK;
-            return static_cast<uintptr_t>(*address);
-        }
-    }
-    common::logError(kModule, common::fromSelf(),
-                     "no node has %llu free pages", static_cast<unsigned long long>(pageCount));
-    return 0;
 }
 
 DsmStatus MemoryModule::release(uintptr_t address, uint64_t& outPageCount) {
@@ -195,9 +287,16 @@ DsmStatus MemoryModule::releaseLocally(uintptr_t address, uint64_t& outPageCount
     if (!allocation) {
         return DSM_ERR_INVALID_POINTER;
     }
+    uint64_t pagesStoredHere = 0;
+    std::set<uint32_t> storageNodes;
     for (uint64_t pageId = firstPageId; pageId < firstPageId + allocation->pageCount; ++pageId) {
         PageTable::Operation operation(msi_.pageTable(), pageId, selfNodeId_);
         const PageEntry entry = operation.read();
+        if (entry.storageNode == selfNodeId_) {
+            ++pagesStoredHere;
+        } else {
+            storageNodes.insert(entry.storageNode);
+        }
         std::set<uint32_t> remoteHolders = entry.copies;
         if (entry.currentHolder != selfNodeId_) {
             remoteHolders.insert(entry.currentHolder);
@@ -208,9 +307,14 @@ DsmStatus MemoryModule::releaseLocally(uintptr_t address, uint64_t& outPageCount
             updated.allocated = false;
             updated.state = MSI_INVALID;
             updated.currentHolder = selfNodeId_;
+            updated.storageNode = selfNodeId_;
             updated.copies.clear();
         });
         window_.discardPage(pageId * config_.pageSize, config_.pageSize);
+    }
+    capacity_.release(pagesStoredHere);
+    for (uint32_t storageNode : storageNodes) {
+        releaseStorageOn(storageNode, firstPageId, allocation->pageCount);
     }
     outPageCount = allocation->pageCount;
     return DSM_OK;
@@ -422,33 +526,81 @@ void MemoryModule::handleWaitingRequest(const IncomingMessage& incoming) {
         case MessageType::MemoryFree:
             handleMemoryFree(incoming);
             return;
-        case MessageType::MemoryRequest:
-            handleMemoryRequest(incoming);
-            return;
         default:
             handlePageRequest(incoming);
     }
 }
 
-void MemoryModule::handleMemoryRequest(const IncomingMessage& incoming) {
+void MemoryModule::handleStorageRequest(const IncomingMessage& incoming) {
     Message response = makeMessage(MessageType::MemoryGrant);
-    const auto request = decodeMemoryRequest(incoming.message.payload);
-    if (!request || request->pageCount == 0) {
+    const auto request = decodeStorageRequest(incoming.message.payload);
+    const auto homeNode =
+        request ? addressMap_.homeNodeOf(addressMap_.pageAddress(request->firstPageId)) : std::nullopt;
+    if (!request || request->pageCount == 0 || !homeNode || *homeNode == selfNodeId_ ||
+        *homeNode != incoming.message.header.sourceNode) {
         response.header.status = DSM_ERR_INVALID_MESSAGE;
         network_.reply(incoming, std::move(response));
         return;
     }
-    DsmStatus status = DSM_OK;
-    const uintptr_t address = allocateLocally(request->pageCount, request->processId, status);
-    response.header.status = status;
-    if (status == DSM_OK) {
-        common::logInfo(kModule, common::fromNode(incoming.message.header.sourceNode),
-                        "granted %llu pages at 0x%llx to remote process %u",
-                        static_cast<unsigned long long>(request->pageCount), static_cast<unsigned long long>(address),
-                        request->processId);
-        response.payload = encodeAddress(address);
+    const uint64_t granted = capacity_.reserveUpTo(request->pageCount);
+    for (uint64_t pageId = request->firstPageId; pageId < request->firstPageId + granted; ++pageId) {
+        PageTable::Operation operation(msi_.pageTable(), pageId, *homeNode);
+        restrictApplications(pageId, PROT_NONE);
+        window_.discardPage(pageId * config_.pageSize, config_.pageSize);
+        operation.update([this, version = request->version](PageEntry& entry) {
+            entry.state = MSI_MODIFIED;
+            entry.currentHolder = selfNodeId_;
+            entry.storageNode = selfNodeId_;
+            entry.version = version;
+            entry.copies.clear();
+        });
+        sync::LockGuard guard(storedPagesMutex_);
+        homeOfStoredPage_[pageId] = *homeNode;
+    }
+    if (granted > 0) {
+        common::logInfo(kModule, common::fromNode(*homeNode), "stores %llu pages from 0x%llx for this home",
+                        static_cast<unsigned long long>(granted),
+                        static_cast<unsigned long long>(addressMap_.pageAddress(request->firstPageId)));
+    }
+    response.payload = encodeAddress(granted);
+    network_.reply(incoming, std::move(response));
+}
+
+void MemoryModule::handleStorageRelease(const IncomingMessage& incoming) {
+    Message response = makeMessage(MessageType::StorageReleaseAck);
+    const auto request = decodeStorageRelease(incoming.message.payload);
+    const auto homeNode =
+        request ? addressMap_.homeNodeOf(addressMap_.pageAddress(request->firstPageId)) : std::nullopt;
+    if (!request || !homeNode || *homeNode == selfNodeId_) {
+        response.header.status = DSM_ERR_INVALID_MESSAGE;
+        network_.reply(incoming, std::move(response));
+        return;
+    }
+    for (uint64_t pageId = request->firstPageId; pageId < request->firstPageId + request->pageCount; ++pageId) {
+        dropStoredPage(pageId, *homeNode);
     }
     network_.reply(incoming, std::move(response));
+}
+
+void MemoryModule::dropStoredPage(uint64_t pageId, uint32_t homeNodeId) {
+    {
+        sync::LockGuard guard(storedPagesMutex_);
+        const auto stored = homeOfStoredPage_.find(pageId);
+        if (stored == homeOfStoredPage_.end() || stored->second != homeNodeId) {
+            return;
+        }
+        homeOfStoredPage_.erase(stored);
+    }
+    PageTable::Operation operation(msi_.pageTable(), pageId, homeNodeId);
+    restrictApplications(pageId, PROT_NONE);
+    operation.update([homeNodeId](PageEntry& entry) {
+        entry.state = MSI_INVALID;
+        entry.currentHolder = homeNodeId;
+        entry.storageNode = homeNodeId;
+        entry.copies.clear();
+    });
+    window_.discardPage(pageId * config_.pageSize, config_.pageSize);
+    capacity_.release(1);
 }
 
 void MemoryModule::handleMemoryFree(const IncomingMessage& incoming) {
@@ -620,11 +772,11 @@ std::vector<PageTableEntry> MemoryModule::pageTableView() {
 }
 
 uint64_t MemoryModule::usedBytes() {
-    return (registry_.totalPageCount() - registry_.freePageCount()) * config_.pageSize;
+    return capacity_.usedPages() * config_.pageSize;
 }
 
 uint64_t MemoryModule::freeBytes() {
-    return registry_.freePageCount() * config_.pageSize;
+    return capacity_.freePages() * config_.pageSize;
 }
 
 }  // namespace dsm::memory

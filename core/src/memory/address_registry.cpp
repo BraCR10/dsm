@@ -1,6 +1,16 @@
 #include "memory/address_registry.h"
 
+#include <algorithm>
+
 namespace dsm::memory {
+
+uint64_t addressPagesFor(uint64_t pageSize, const std::vector<uint64_t>& nodeMemorySizes, uint64_t nodeRangeSpacing) {
+    uint64_t totalBytes = 0;
+    for (uint64_t memorySize : nodeMemorySizes) {
+        totalBytes += memorySize;
+    }
+    return std::min(totalBytes, nodeRangeSpacing) / pageSize;
+}
 
 AddressRegistry::AddressRegistry(uint64_t pageCount) : totalPageCount_(pageCount), slots_(pageCount) {}
 
@@ -49,6 +59,17 @@ std::optional<Allocation> AddressRegistry::release(uint64_t firstPageIndex) {
 bool AddressRegistry::isBlockStart(uint64_t pageIndex) {
     sync::LockGuard guard(mutex_);
     return pageIndex < totalPageCount_ && slots_[pageIndex].blockStart;
+}
+
+std::vector<uint64_t> AddressRegistry::blocksOf(uint32_t processId) {
+    sync::LockGuard guard(mutex_);
+    std::vector<uint64_t> blocks;
+    for (uint64_t index = 0; index < totalPageCount_; ++index) {
+        if (slots_[index].blockStart && slots_[index].processId == processId) {
+            blocks.push_back(index);
+        }
+    }
+    return blocks;
 }
 
 std::optional<PageUsage> AddressRegistry::usageOf(uint64_t pageIndex) {
