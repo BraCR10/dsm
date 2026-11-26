@@ -22,6 +22,13 @@ belongs to the machine and whose ports are free:
 ./build/dsm_node
 ```
 
+Each node offers the `memory_size` of its entry, and the memory of the cluster is the sum of all
+of them. The node an application attaches to is the home of everything the application allocates.
+When an allocation does not fit in the free memory of that node, the node stores the remaining pages
+on other nodes, the one with the most free memory first, and the application still receives one
+contiguous range of addresses. MSI then moves each page to the node that uses it. When an
+application exits without freeing its memory, its node releases it.
+
 Write a message through node 0 and, from another terminal, read it through node 1 with the address
 printed by the writer. Keep the writer running while reading: pressing Enter frees the message.
 

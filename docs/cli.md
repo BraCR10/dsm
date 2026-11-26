@@ -19,6 +19,10 @@ Queries the cluster through the DSM node running on this machine.
 In a page table, `PROCESS`, `ORDER` and `COPIES` are known only by the home node of the page. Rows of
 pages whose home is another node show `-` in those columns.
 
+`STORE` is the node that keeps the memory of the page for its allocation. It differs from `HOME` when the
+home did not have enough free memory and stored that page on another node. `USED` and `FREE` in `stats`
+count the pages each node stores, its own and the ones it stores for other homes.
+
 `read` first checks in the page table of the home node that the address is allocated, then reads it like
 any application, so the node of the CLI keeps a shared copy of that page. It refuses addresses outside the
 shared window, addresses that are not allocated, and 8 bytes that cross the end of a page.
