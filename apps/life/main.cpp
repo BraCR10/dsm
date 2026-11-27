@@ -766,7 +766,7 @@ int main(int argumentCount, char** arguments) {
     if (!validateOptions(options)) {
         return 2;
     }
-    const int status = dsm_init(options.configPath.c_str(), options.nodeId, 0);
+    const int status = dsm_init(options.configPath.c_str(), options.nodeId);
     if (status == DSM_ERR_NODE_UNAVAILABLE) {
         std::printf("No DSM node is running on this machine. Start one with dsm_node.\n");
         return 1;

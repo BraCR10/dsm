@@ -270,7 +270,7 @@ int main(int argumentCount, char** arguments) {
         printUsage();
         return 2;
     }
-    const int status = dsm_init(kConfigPath, nodeId, 0);
+    const int status = dsm_init(kConfigPath, nodeId);
     if (status == DSM_ERR_NODE_UNAVAILABLE) {
         std::printf("No DSM node is running on this machine. Start one with dsm_node.\n");
         return 1;

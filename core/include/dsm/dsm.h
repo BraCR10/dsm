@@ -71,7 +71,7 @@ typedef struct DsmStats {
     uint64_t free_memory_bytes;
 } DsmStats;
 
-int dsm_init(const char* config_path, int node_id, size_t shared_memory_bytes);
+int dsm_init(const char* config_path, int node_id);
 int dsm_finalize(void);
 
 void* dsm_malloc(size_t size);

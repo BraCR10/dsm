@@ -51,8 +51,8 @@ int runSyncOperation(int objectId, SyncOperation operation) {
 
 extern "C" {
 
-int dsm_init(const char* config_path, int node_id, size_t shared_memory_bytes) {
-    if (config_path == nullptr || shared_memory_bytes != 0) {
+int dsm_init(const char* config_path, int node_id) {
+    if (config_path == nullptr) {
         return DSM_ERR_INVALID_ARGUMENT;
     }
     dsm::sync::LockGuard guard(runtimeMutex);
