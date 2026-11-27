@@ -14,19 +14,26 @@
     {
       "node_id": 0,
       "ip": "127.0.0.1",
-      "ports": { "main": 8080, "heartbeat": 8280 }
+      "ports": { "main": 27000, "heartbeat": 27050 },
+      "memory_size": 4194304
     },
     {
       "node_id": 1,
       "ip": "127.0.0.1",
-      "ports": { "main": 8081, "heartbeat": 8281 },
+      "ports": { "main": 27001, "heartbeat": 27051 },
       "memory_size": 4194304
     },
     {
       "node_id": 2,
       "ip": "127.0.0.1",
-      "ports": { "main": 8082, "heartbeat": 8282 },
-      "memory_size": 2097152
+      "ports": { "main": 27002, "heartbeat": 27052 },
+      "memory_size": 4194304
+    },
+    {
+      "node_id": 3,
+      "ip": "127.0.0.1",
+      "ports": { "main": 27003, "heartbeat": 27053 },
+      "memory_size": 4194304
     }
   ]
 }
